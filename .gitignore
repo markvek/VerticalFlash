@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Environment files (keep secrets out of git)
+.env
+.env.local
+.env.*.local
+
+# Debug
+npm-debug.log*
+
+# Misc
+.DS_Store
+*.tsbuildinfo
+
+# TikTok OAuth token (single-user, local only)
+tiktok-token.json
+
+# TikHub analytics cache (24-hour TTL, rebuilt on sync)
+tikhub-cache.json
+
+# Publish/analytics stores (single-user, local only)
+publishes.json
+published-links.json
+performance-insights.json
+
+# Local dev TLS certificates
+/certificates/
+
+# Downloaded videos (local only)
+/downloads/
+/analysis/
+/library/
+/renders/
+/generated/
+
+# Music library (local only)
+/music/
+
+# Your brand description (copy brand.config.example.json)
+brand.config.json
+
+# Local tooling
+.gstack/
+.context/

@@ -1,0 +1,27 @@
+{
+  "$comment": "Copy to brand.config.json and describe your own product. This example is Duckla, a yellow duck plush car accessory. Restart the dev server after editing.",
+  "name": "Duckla",
+  "product": {
+    "shortName": "the duck",
+    "description": "a small YELLOW DUCK PLUSH toy, often placed on a car dashboard or used as a car accessory",
+    "character": "a small bright-yellow duck plush toy (the Duckla car-accessory mascot)",
+    "presenceRule": "true ONLY if the yellow duck plush product is visible in the frame at any point"
+  },
+  "categories": [
+    { "id": "packing", "description": "packing orders/boxes" },
+    { "id": "setup_process", "description": "setting up a scene/product/workspace" },
+    { "id": "driving", "description": "driving footage" },
+    { "id": "product_showcase", "description": "deliberately featuring the duck" },
+    { "id": "unboxing", "description": "unboxing or first look" },
+    { "id": "b_roll", "description": "scenery/filler" },
+    { "id": "talking_head", "description": "person talking to camera" },
+    { "id": "other", "description": "anything else" }
+  ],
+  "tags": {
+    "subject": ["duckla", "yellow duck", "plush toy", "car accessory"],
+    "setting": ["tesla", "dashboard", "car interior", "steering wheel", "navigation screen", "touchscreen"],
+    "action": [],
+    "camera": []
+  },
+  "libraryDir": "library"
+}

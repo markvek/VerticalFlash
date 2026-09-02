@@ -1,0 +1,45 @@
+// Shape of one file in the GET /api/downloads listing, shared by the API
+// route and the client views that render it (downloads homepage, sidebar).
+
+export interface DownloadEntryMeta {
+  caption: string;
+  authorHandle: string;
+  authorName: string;
+  playCount: number;
+  likeCount: number;
+  commentCount: number;
+  shareCount: number;
+  duration: number;
+  createdAt: number;
+}
+
+// Creation brief for projects started from /create (absent for TikTok
+// downloads): the flow, the prompt, the target length, and the song
+export interface DownloadEntryProject {
+  kind: "music" | "prompt";
+  prompt: string;
+  targetDuration: number;
+  music: {
+    filename: string;
+    title: string;
+    author: string;
+    duration: number | null;
+  } | null;
+}
+
+export interface DownloadEntry {
+  name: string;
+  size: number;
+  modified: number;
+  // Max mtime (ms) across the project's files (mp4, metadata, analysis +
+  // sidecars, render manifest) — "last time I made changes to this project"
+  lastEditedAt: number | null;
+  displayName: string;
+  videoId: string | null;
+  version: number;
+  meta: DownloadEntryMeta | null;
+  project: DownloadEntryProject | null;
+  analysis: { analyzedAt: string | null; shotCount: number } | null;
+  render: { renderedAt: string | null; durationSeconds: number | null } | null;
+  generatedClips: number;
+}

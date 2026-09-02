@@ -1,0 +1,14 @@
+// Every edit-state sidecar kept under analysis/<videoId>.<kind>.json. Shared
+// by the downloads listing (last-edited mtime), delete, and fork so a new
+// sidecar kind only has to be registered once.
+export const SIDECAR_KINDS = [
+  "recommendations",
+  "generation",
+  "edit-notes",
+  "text-overlays",
+  "captions",
+  "variations",
+  "project",
+] as const;
+
+export type SidecarKind = (typeof SIDECAR_KINDS)[number];

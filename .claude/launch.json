@@ -1,0 +1,46 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev-server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 3000
+    },
+    {
+      "name": "dev-server-https",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev:https"
+      ],
+      "port": 3000,
+      "url": "https://localhost:3000"
+    },
+    {
+      "name": "dev-server-3001",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "-p",
+        "3001"
+      ],
+      "port": 3001
+    },
+    {
+      "name": "dev-server-auto",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "port": 3000,
+      "autoPort": true
+    }
+  ]
+}
