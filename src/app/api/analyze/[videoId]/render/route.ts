@@ -20,6 +20,10 @@ import { ANALYSIS_DIR } from "@/lib/paths";
 import { findDownloadFile } from "@/lib/download-files";
 import { readProjectMeta } from "@/lib/project-meta";
 import { cutdownSourceShots, withSourceRanges } from "@/lib/cutdown-build";
+import { readBrollTrack } from "@/lib/broll-store";
+import { resolveBrollTrack } from "@/lib/broll-resolve";
+import { readMasterSegments } from "@/lib/master-analyze";
+import type { BrollRenderSegment } from "@/lib/render-remake";
 
 // Encoding ~15 segments plus any on-demand Gemini trim calls takes a while
 export const maxDuration = 300;
@@ -146,6 +150,17 @@ export async function POST(
       sourceShots = await cutdownSourceShots(meta);
     }
 
+    // The B-roll track: placed segments with a clip, resolved onto the
+    // output timeline (suggested and invalid ones are not rendered)
+    const brollTrack = await readBrollTrack(videoId);
+    const words = meta?.kind === "cutdown" ? ((await readMasterSegments(meta.masterId))?.words ?? null) : null;
+    const brollResolved = new Map(resolveBrollTrack(brollTrack, analysis.shots, words).map((r) => [r.id, r]));
+    const broll: BrollRenderSegment[] = brollTrack.segments.flatMap((s) => {
+      const r = brollResolved.get(s.id);
+      if (s.status !== "placed" || !s.clip || !r?.valid) return [];
+      return [{ id: s.id, filename: s.clip.filename, start: r.start, end: r.end, clip_start: s.clip.clip_start, phrase: s.phrase }];
+    });
+
     let editNotes: Record<string, string> = {};
     try {
       const raw = await fs.readFile(editNotesPath(videoId), "utf8");
@@ -174,6 +189,7 @@ export async function POST(
       burnText,
       textOverlays,
       sourceShots,
+      broll,
     });
 
     return NextResponse.json(manifest);

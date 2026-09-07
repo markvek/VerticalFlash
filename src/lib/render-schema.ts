@@ -114,6 +114,20 @@ export const RenderManifestZ = z.object({
     .optional(),
   warnings: z.array(z.string()),
   shots: z.array(RenderShotZ),
+  // B-roll track segments composited over the cut (absent on renders made
+  // before the track existed)
+  broll: z
+    .array(
+      z.object({
+        id: z.string(),
+        filename: z.string(),
+        start: z.number(),
+        end: z.number(),
+        clip_start: z.number(),
+        phrase: z.string(),
+      })
+    )
+    .optional(),
 });
 
 export type RenderManifest = z.infer<typeof RenderManifestZ>;

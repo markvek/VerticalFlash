@@ -895,6 +895,104 @@ export interface RenderInput {
   // assembled per shot from the same ranges, so a shot's length is just
   // its numbers. null entries fall back to the short.
   sourceShots?: Array<{ path: string; filename: string; start: number; end: number } | null> | null;
+  // B-roll track: placed segments to composite over the cut, already
+  // resolved to seconds on the output timeline. The speaker's audio is
+  // untouched underneath.
+  broll?: BrollRenderSegment[] | null;
+}
+
+export interface BrollRenderSegment {
+  id: string;
+  filename: string;
+  start: number;
+  end: number;
+  clip_start: number | null;
+  phrase: string;
+}
+
+// Composite the B-roll segments over the cut in one encode pass: each
+// segment is normalized to the output format, shifted to its start time,
+// and overlaid only between its start and end (eof_action=pass keeps the
+// cut visible outside the window). A clip shorter than its segment holds
+// its last frame.
+async function overlayBroll(
+  basePath: string,
+  segments: BrollRenderSegment[],
+  videoId: string,
+  workDir: string,
+  warnings: string[]
+): Promise<{ path: string; applied: NonNullable<RenderManifest["broll"]> }> {
+  const inputs: string[] = [];
+  const applied: NonNullable<RenderManifest["broll"]> = [];
+  for (const seg of segments) {
+    const duration = seg.end - seg.start;
+    if (duration < 0.1) continue;
+    const clipPath = resolveClipPath(videoId, seg.filename);
+    const clipDuration = await probeDuration(clipPath);
+    if (clipDuration == null) {
+      warnings.push(`B-roll ${seg.filename} could not be read — segment at ${seg.start.toFixed(1)}s skipped`);
+      continue;
+    }
+    const start = Math.max(0, Math.min(seg.clip_start ?? 0, Math.max(0, clipDuration - 0.2)));
+    const available = Math.min(clipDuration - start, duration);
+    const pad = Math.max(0, duration - available);
+    if (pad > 0.05) {
+      warnings.push(
+        `B-roll ${seg.filename} has ${available.toFixed(1)}s from ${start.toFixed(1)}s but the segment runs ${duration.toFixed(1)}s — last frame held`
+      );
+    }
+    const segPath = join(workDir, `broll_${String(applied.length).padStart(2, "0")}.mp4`);
+    try {
+      await encodeClipSegment(clipPath, start, duration, pad, segPath);
+    } catch (error) {
+      console.error(`B-roll segment encode failed for ${seg.filename}:`, error);
+      warnings.push(`B-roll ${seg.filename}: ffmpeg failed — segment at ${seg.start.toFixed(1)}s skipped`);
+      continue;
+    }
+    inputs.push(segPath);
+    applied.push({
+      id: seg.id,
+      filename: seg.filename,
+      start: seg.start,
+      end: seg.end,
+      clip_start: Math.round(start * 100) / 100,
+      phrase: seg.phrase,
+    });
+  }
+  if (inputs.length === 0) return { path: basePath, applied };
+
+  const filters: string[] = [];
+  let prev = "[0:v]";
+  applied.forEach((seg, i) => {
+    const s = seg.start.toFixed(3);
+    const e = seg.end.toFixed(3);
+    filters.push(`[${i + 1}:v]setpts=PTS-STARTPTS+${s}/TB[o${i}]`);
+    filters.push(`${prev}[o${i}]overlay=eof_action=pass:enable='between(t,${s},${e})'[v${i}]`);
+    prev = `[v${i}]`;
+  });
+  const outPath = join(workDir, "out-broll.mp4");
+  await execFileAsync(
+    "ffmpeg",
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-y",
+      "-i",
+      basePath,
+      ...inputs.flatMap((p) => ["-i", p]),
+      "-filter_complex",
+      filters.join(";"),
+      "-map",
+      prev,
+      ...ENCODE_ARGS,
+      "-movflags",
+      "+faststart",
+      outPath,
+    ],
+    { maxBuffer: FFMPEG_MAX_BUFFER }
+  );
+  return { path: outPath, applied };
 }
 
 export async function renderRemake(
@@ -912,6 +1010,7 @@ export async function renderRemake(
     burnText = false,
     textOverlays = null,
     sourceShots = null,
+    broll = null,
   } = input;
   const audioMode: "music" | "original" | "none" =
     input.audio ?? (includeOriginalAudio ? "original" : "none");
@@ -1144,12 +1243,27 @@ export async function renderRemake(
       { maxBuffer: FFMPEG_MAX_BUFFER }
     );
 
+    // B-roll track: composite the placed segments over the cut before the
+    // text burn, so on-screen text stays on top of the B-roll
+    let brollBase = outPath;
+    let brollApplied: NonNullable<RenderManifest["broll"]> = [];
+    if (broll && broll.length > 0) {
+      try {
+        const result = await overlayBroll(outPath, broll, videoId, workDir, warnings);
+        brollBase = result.path;
+        brollApplied = result.applied;
+      } catch (error) {
+        console.error("B-roll overlay failed:", error);
+        warnings.push("Compositing the B-roll track failed — rendered without it");
+      }
+    }
+
     // Phase 2: burn the per-shot on-screen text over the cut — one extra
     // encode pass; the concat above stays a lossless stream copy. The "png"
     // engine composites rasterized text blocks with the overlay filter
     // (rounded pills, color emoji); "ass" burns libass subtitles and remains
     // the fallback.
-    let burnedPath = outPath;
+    let burnedPath = brollBase;
     let textBurn: RenderManifest["text_burn"] = null;
     if (burnText) {
       let style = textOverlays?.style ?? DEFAULT_TEXT_STYLE;
@@ -1493,6 +1607,7 @@ export async function renderRemake(
       text_burn: textBurn,
       warnings,
       shots: planned.map(({ rec: _rec, ...shot }) => shot),
+      broll: brollApplied,
     });
 
     const manifestPath = renderManifestPath(videoId);

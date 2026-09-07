@@ -17,7 +17,18 @@ import {
 import { extractVideoId } from "@/lib/video-id";
 import { MusicPicker } from "@/components/form/MusicPicker";
 import { StoryboardPanel } from "@/components/form/StoryboardPanel";
-import { ShotTimeline, type TimelineResize } from "@/components/data/ShotTimeline";
+import { ShotTimeline, type TimelineBroll, type TimelineResize } from "@/components/data/ShotTimeline";
+import { BrollSegmentPopover } from "@/components/form/BrollSegmentPopover";
+import type { BrollAnchor, BrollSegment, BrollTrack } from "@/lib/broll-schema";
+import {
+  anchorForRange,
+  anchorForShot,
+  brollCoverage,
+  MIN_BROLL_SECONDS,
+  phraseForAnchor,
+  resolveBrollTrack,
+  wordsForShot,
+} from "@/lib/broll-resolve";
 import type { DownloadEntryProject } from "@/lib/download-types";
 import {
   footageToShortTime,
@@ -154,6 +165,8 @@ interface RenderManifest {
   } | null;
   warnings: string[];
   shots: RenderShot[];
+  // Absent on renders made before the B-roll track existed
+  broll?: Array<{ id: string; filename: string; start: number; end: number; clip_start: number; phrase: string }>;
 }
 
 interface TextOverlaysData {
@@ -404,6 +417,28 @@ function VideoViewerContent() {
   // A cutdown's master transcript, for snapping drags to words
   const [masterSegs, setMasterSegs] = useState<{ words: Word[]; sentences: Sentence[] } | null>(null);
   const [masterDuration, setMasterDuration] = useState<number | null>(null);
+  // The B-roll track: voice-anchored segments over the speaker
+  const [brollTrack, setBrollTrack] = useState<BrollTrack | null>(null);
+  const [brollSelected, setBrollSelected] = useState<string | null>(null);
+  const [brollRect, setBrollRect] = useState<DOMRect | null>(null);
+  // Which B-roll step is running ("save", "suggest", "match", "moment")
+  const [brollBusy, setBrollBusy] = useState<string | null>(null);
+  // The segment the clip library modal is picking for (null = shot mode)
+  const [brollLibraryFor, setBrollLibraryFor] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!videoId) return;
+    let cancelled = false;
+    fetch(`/api/analyze/${videoId}/broll`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.track) setBrollTrack(data.track);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [videoId]);
 
   // A cutdown whose shots all live in the master plays the master directly
   // and hops between the shots' footage ranges, so a length change on the
@@ -1243,10 +1278,175 @@ function VideoViewerContent() {
           snap: masterBacked && masterSegs?.words.length ? snapToWords : undefined,
         }
       : null;
+  // ---- B-roll track: resolve anchors to seconds, and the edit handlers ---
+  const masterWords = masterSegs?.words ?? null;
+  // Attached-footage shots have no master words: resolve them by offset
+  const brollShots = (analysis?.shots ?? []).map((s) =>
+    s.source_clip ? { ...s, source_start: undefined, source_end: undefined } : s
+  );
+  const brollResolved = brollTrack && analysis ? resolveBrollTrack(brollTrack, brollShots, masterWords) : [];
+  const brollBlocks = (brollTrack?.segments ?? []).map((s) => {
+    const r = brollResolved.find((x) => x.id === s.id);
+    return {
+      id: s.id,
+      start: r?.start ?? 0,
+      end: r?.end ?? 0,
+      valid: r?.valid ?? false,
+      reason: r?.reason,
+      status: s.status,
+      clip: s.clip,
+      phrase: s.phrase,
+      description: s.description,
+    };
+  });
+  const shortLength = analysis?.shots.length ? analysis.shots[analysis.shots.length - 1].end_time : 0;
+  const brollShotAt = (t: number) =>
+    brollShots.find((s) => t >= s.start_time && t < s.end_time) ?? brollShots[brollShots.length - 1];
+
+  const saveBroll = async (segments: BrollSegment[]) => {
+    if (!videoId) return false;
+    setBrollBusy("save");
+    try {
+      const res = await fetch(`/api/analyze/${videoId}/broll`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ segments }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Saving the B-roll track failed");
+      setBrollTrack(data.track);
+      return true;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Saving the B-roll track failed");
+      return false;
+    } finally {
+      setBrollBusy(null);
+    }
+  };
+  const newBrollSegment = (anchor: BrollAnchor, extras: Partial<BrollSegment> = {}): BrollSegment => ({
+    id: Math.random().toString(36).slice(2, 10),
+    anchor,
+    clip: null,
+    status: "placed",
+    phrase: phraseForAnchor(anchor, masterWords),
+    description: null,
+    candidates: [],
+    createdAt: new Date().toISOString(),
+    ...extras,
+  });
+  const addBrollSegment = async (segment: BrollSegment) => {
+    const ok = await saveBroll([...(brollTrack?.segments ?? []), segment]);
+    if (ok) {
+      setBrollSelected(segment.id);
+      setBrollRect(null);
+    }
+  };
+  const brollUpdate = (id: string, patch: (s: BrollSegment) => BrollSegment) =>
+    saveBroll((brollTrack?.segments ?? []).map((s) => (s.id === id ? patch(s) : s)));
+  const brollCreateFromWords = (shotIndex: number, startWord: number, endWord: number) => {
+    addBrollSegment(newBrollSegment({ kind: "words", shot_index: shotIndex, start_word: startWord, end_word: endWord }));
+  };
+  const brollCreateAt = (t: number) => {
+    const shot = brollShotAt(t);
+    if (!shot) return;
+    const end = Math.min(shot.end_time, t + 3);
+    const start = Math.max(shot.start_time, Math.min(t, end - MIN_BROLL_SECONDS));
+    if (end - start < MIN_BROLL_SECONDS) return;
+    addBrollSegment(newBrollSegment(anchorForRange(shot, start, end, masterWords)));
+  };
+  const brollChangeRange = (id: string, start: number, end: number) => {
+    const seg = brollTrack?.segments.find((s) => s.id === id);
+    const shot = seg && brollShots.find((s) => s.index === seg.anchor.shot_index);
+    if (!seg || !shot) return;
+    const anchor = anchorForRange(shot, start, end, masterWords);
+    brollUpdate(id, (s) => ({ ...s, anchor, phrase: phraseForAnchor(anchor, masterWords) }));
+  };
+  const brollRemove = (id: string) => {
+    if (brollSelected === id) setBrollSelected(null);
+    saveBroll((brollTrack?.segments ?? []).filter((s) => s.id !== id));
+  };
+  const brollSetClip = (id: string, filename: string, clipStart: number | null) =>
+    brollUpdate(id, (s) => ({
+      ...s,
+      clip: { filename, clip_start: clipStart, source: isGeneratedClip(filename) ? "generated" : "library" },
+    }));
+  const brollPlaceRec = (shotIndex: number, rec: { filename: string; trim_start?: number | null }) => {
+    const shot = brollShots.find((s) => s.index === shotIndex);
+    if (!shot) return;
+    addBrollSegment(
+      newBrollSegment(anchorForShot(shot, masterWords), {
+        clip: {
+          filename: rec.filename,
+          clip_start: rec.trim_start ?? null,
+          source: isGeneratedClip(rec.filename) ? "generated" : "library",
+        },
+      })
+    );
+  };
+  const runBroll = async (action: "suggest" | "match" | "moment", segmentIds?: string[]) => {
+    if (!videoId || brollBusy) return;
+    setBrollBusy(action);
+    try {
+      const res = await fetch(`/api/analyze/${videoId}/broll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, segment_ids: segmentIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `B-roll ${action} failed`);
+      setBrollTrack(data.track);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : `B-roll ${action} failed`);
+    } finally {
+      setBrollBusy(null);
+    }
+  };
+  const timelineBroll: TimelineBroll | null =
+    videoId && analysis
+      ? {
+          blocks: brollBlocks,
+          selectedId: brollSelected,
+          coverage: {
+            covered: brollCoverage(
+              brollResolved.filter((r) => {
+                const seg = brollTrack?.segments.find((s) => s.id === r.id);
+                return seg?.status === "placed" && !!seg.clip;
+              })
+            ),
+            total: shortLength,
+          },
+          busy: brollBusy != null,
+          thumbSrc,
+          onSelect: (id, rect) => {
+            setBrollSelected(id);
+            setBrollRect(rect);
+          },
+          onChangeRange: brollChangeRange,
+          onCreateAt: brollCreateAt,
+          onRemove: brollRemove,
+          onAcceptAll: () =>
+            saveBroll(
+              (brollTrack?.segments ?? []).map((s) => (s.status === "suggested" && s.clip ? { ...s, status: "placed" } : s))
+            ),
+          wordsForShot:
+            masterBacked && masterWords
+              ? (i) => {
+                  const shot = brollShots.find((s) => s.index === i);
+                  return shot ? wordsForShot(masterWords, shot) : [];
+                }
+              : undefined,
+          onPhrase: masterBacked && masterWords ? brollCreateFromWords : undefined,
+          onPlaceRec: brollPlaceRec,
+        }
+      : null;
+
   const renderStale =
     !!render &&
-    !!analysis?.shotsEditedAt &&
-    new Date(render.renderedAt).getTime() < new Date(analysis.shotsEditedAt).getTime();
+    ((!!analysis?.shotsEditedAt &&
+      new Date(render.renderedAt).getTime() < new Date(analysis.shotsEditedAt).getTime()) ||
+      (!!brollTrack &&
+        brollTrack.segments.length > 0 &&
+        new Date(render.renderedAt).getTime() < new Date(brollTrack.updatedAt).getTime()));
 
   // What a render would use per shot: your pick, the top match, or nothing
   const renderBreakdown = recs
@@ -1897,6 +2097,14 @@ function VideoViewerContent() {
                           >
                             {selectedKeepSource ? "✓ No B-Roll" : "No B-Roll"}
                           </button>
+                          <button
+                            onClick={() => runBroll("suggest")}
+                            disabled={brollBusy != null}
+                            title="Gemini picks phrases worth covering with B-roll and matches clips for them — review them on the timeline"
+                            className="px-2 py-0.5 rounded-md border border-violet-500/60 text-[10px] font-semibold text-violet-500 hover:bg-violet-500/10 disabled:opacity-50"
+                          >
+                            {brollBusy === "suggest" ? "Suggesting…" : "✦ Suggest B-roll moments"}
+                          </button>
                           {!previewClip && (
                             <button
                               onClick={() => setAllClipsOpen(true)}
@@ -2153,6 +2361,14 @@ function VideoViewerContent() {
                                 <p className="text-[11px] text-muted-foreground leading-snug">
                                   {r.reason}
                                 </p>
+                                <button
+                                  onClick={() => brollPlaceRec(selectedShot, r)}
+                                  disabled={brollBusy != null}
+                                  title="Cover this shot with the clip on the B-roll track; trim it on the timeline afterwards"
+                                  className="self-start mt-0.5 px-2 py-0.5 rounded-md bg-violet-600 text-white text-[10px] font-semibold hover:bg-violet-500 disabled:opacity-50"
+                                >
+                                  Place on timeline ▸
+                                </button>
                                 {r.moment_note && (
                                   <p className="text-[10px] text-primary/90 leading-snug">
                                     ⏱ {r.moment_note}
@@ -2351,6 +2567,9 @@ function VideoViewerContent() {
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <p className="text-xs font-bold text-foreground uppercase tracking-wide">
                         Render output · {render.durationSeconds.toFixed(1)}s
+                        {render.broll?.length
+                          ? ` · ${render.broll.length} B-roll segment${render.broll.length === 1 ? "" : "s"}`
+                          : ""}
                         {render.time_mode === "follow_original"
                           ? " · follows original lighting"
                           : render.time_target
@@ -2780,6 +2999,7 @@ function VideoViewerContent() {
                   : null
               }
               resize={timelineResize}
+              broll={timelineBroll}
             />
             {timelineResize && (
               <p className="text-[10px] text-muted-foreground">
@@ -2813,11 +3033,61 @@ function VideoViewerContent() {
       </div>
       <ClipLibraryModal
         open={allClipsOpen}
-        onClose={() => setAllClipsOpen(false)}
-        shotDuration={shot ? shot.end_time - shot.start_time : null}
-        selectedFilename={selectedClipFilename}
-        onSelect={selectFromLibrary}
+        onClose={() => {
+          setAllClipsOpen(false);
+          setBrollLibraryFor(null);
+        }}
+        shotDuration={
+          brollLibraryFor
+            ? (() => {
+                const b = brollBlocks.find((x) => x.id === brollLibraryFor);
+                return b ? b.end - b.start : null;
+              })()
+            : shot
+              ? shot.end_time - shot.start_time
+              : null
+        }
+        selectedFilename={
+          brollLibraryFor
+            ? (brollTrack?.segments.find((s) => s.id === brollLibraryFor)?.clip?.filename ?? null)
+            : selectedClipFilename
+        }
+        onSelect={(filename) => {
+          if (brollLibraryFor) {
+            brollSetClip(brollLibraryFor, filename, null);
+            setAllClipsOpen(false);
+            setBrollLibraryFor(null);
+          } else {
+            selectFromLibrary(filename);
+          }
+        }}
       />
+      {brollSelected &&
+        brollTrack &&
+        (() => {
+          const seg = brollTrack.segments.find((s) => s.id === brollSelected);
+          const block = brollBlocks.find((b) => b.id === brollSelected);
+          if (!seg || !block) return null;
+          return (
+            <BrollSegmentPopover
+              segment={{ ...block, candidates: seg.candidates }}
+              anchorRect={brollRect}
+              thumbSrc={thumbSrc}
+              clipSrc={clipSrc}
+              busy={brollBusy}
+              onClose={() => setBrollSelected(null)}
+              onUseCandidate={(c) => brollSetClip(seg.id, c.filename, c.clip_start)}
+              onOpenLibrary={() => {
+                setBrollLibraryFor(seg.id);
+                setAllClipsOpen(true);
+              }}
+              onMatch={() => runBroll("match", [seg.id])}
+              onRepickMoment={() => runBroll("moment", [seg.id])}
+              onAccept={() => brollUpdate(seg.id, (s) => ({ ...s, status: "placed" }))}
+              onRemove={() => brollRemove(seg.id)}
+            />
+          );
+        })()}
     </div>
   );
 }
