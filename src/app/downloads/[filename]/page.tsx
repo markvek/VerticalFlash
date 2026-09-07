@@ -2962,7 +2962,11 @@ function VideoViewerContent() {
               Timeline
             </h2>
             <ShotTimeline
-              shots={analysis.shots.map((s) => ({ ...s, screenshot: shotThumb(s) }))}
+              shots={analysis.shots.map((s) => ({
+                ...s,
+                screenshot: shotThumb(s),
+                title: s.on_screen_text || s.description,
+              }))}
               selectedShot={selectedShot}
               playheadTime={playheadTime}
               timelineRef={timelineRef}

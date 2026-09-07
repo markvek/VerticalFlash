@@ -25,6 +25,9 @@ export interface TimelineShot {
   tags?: string[];
   source_start?: number;
   source_end?: number;
+  // One-line summary shown on the shot chip (the on-screen line, or the
+  // description when there is none)
+  title?: string;
 }
 
 export interface TimelineRec {
@@ -130,6 +133,26 @@ interface PhraseSel {
 }
 
 const fmt = (s: number) => `${Math.floor(s / 60)}:${(s - Math.floor(s / 60) * 60).toFixed(1).padStart(4, "0")}`;
+
+// Shot chip colours by section (the Paper design's orange hook chip; the
+// close in green; everything else neutral)
+const CHIP_STYLES: Record<string, { chip: string; badge: string; edge: string }> = {
+  Hook: {
+    chip: "border-[oklch(55.7%_0.158_45.4)] bg-[oklab(77%_0.071_-0.012/20%)]",
+    badge: "bg-[oklab(76.9%_0.064_0.177/15%)] text-[oklch(55.5%_0.163_49)]",
+    edge: "border-[oklab(39.4%_0.053_-0.009/80%)]",
+  },
+  End: {
+    chip: "border-green-600/70 bg-green-500/15",
+    badge: "bg-green-500/15 text-green-500",
+    edge: "border-green-900/80",
+  },
+  default: {
+    chip: "border-border bg-muted/40",
+    badge: "bg-muted text-muted-foreground",
+    edge: "border-border",
+  },
+};
 
 export function ShotTimeline({
   shots,
@@ -365,7 +388,7 @@ export function ShotTimeline({
     <div className="flex rounded-lg border border-border overflow-hidden">
       {/* Track labels */}
       <div className="flex flex-col shrink-0 bg-muted/40 border-r border-border text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        <div className="h-24 flex items-center px-2">Video</div>
+        <div className="h-16 flex items-center px-2">Video</div>
         {broll && (
           <div className="h-16 flex flex-col justify-center px-2 border-t border-border text-violet-500" title="Seconds of the short covered by B-roll">
             <span>B-roll</span>
@@ -433,17 +456,48 @@ export function ShotTimeline({
                     s.index === selectedShot ? "bg-primary/10" : "hover:bg-muted/40"
                   }`}
                 >
-                  {/* The frame keeps its aspect at track height, pinned
-                      left; the rest of the shot's span is a grey slab */}
-                  <div className="w-full h-24 bg-muted flex justify-start overflow-hidden">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={s.screenshot}
-                      alt={`Shot ${s.index + 1}`}
-                      className="h-24 w-auto max-w-full object-contain object-left shrink-0"
-                      loading="lazy"
-                    />
-                  </div>
+                  {/* Shot chip (Paper LLW-0): the frame cropped on the
+                      left, then time range, section pill, and the shot's
+                      line; edge markers echo the draggable boundaries */}
+                  {(() => {
+                    const section = sectionFor(s.index);
+                    const style = CHIP_STYLES[section?.label ?? ""] ?? CHIP_STYLES.default;
+                    return (
+                      <div className="w-full h-16 px-1 py-1.5">
+                        <div
+                          className={`relative h-[52px] rounded-lg border overflow-hidden flex items-center gap-1.5 pr-2 ${style.chip} ${
+                            s.index === selectedShot ? "ring-2 ring-primary/40" : ""
+                          }`}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={s.screenshot}
+                            alt={`Shot ${s.index + 1}`}
+                            className="h-full w-10 shrink-0 object-cover bg-muted"
+                            loading="lazy"
+                            draggable={false}
+                          />
+                          <div className="min-w-0">
+                            <div className="flex h-5 items-center gap-2 overflow-hidden whitespace-nowrap">
+                              <span className="text-[10px] font-mono text-muted-foreground">
+                                {fmt(s.start_time)}–{fmt(s.start_time + durationFor(s.index))}
+                              </span>
+                              {section && (
+                                <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.25px] ${style.badge}`}>
+                                  {section.label}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] leading-[15px] text-muted-foreground truncate">
+                              {s.title || s.on_screen_text || s.description}
+                            </p>
+                          </div>
+                          <div className={`pointer-events-none absolute inset-y-0 left-0 w-1.5 border-l-2 ${style.edge}`} />
+                          <div className={`pointer-events-none absolute inset-y-0 right-0 w-1.5 border-r-2 ${style.edge}`} />
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {/* B-roll track spacer: the blocks are drawn once, over
                       all columns, below */}
                   {broll && <div className="h-16 w-full border-t border-border" />}
@@ -544,7 +598,7 @@ export function ShotTimeline({
           {broll && (
             <div
               className="absolute left-0 right-0 z-10"
-              style={{ top: 96, height: 64 }}
+              style={{ top: 64, height: 64 }}
               onClick={(e) => {
                 if (e.target !== e.currentTarget || broll.busy) return;
                 const rect = e.currentTarget.getBoundingClientRect();
