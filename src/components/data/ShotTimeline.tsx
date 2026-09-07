@@ -567,7 +567,7 @@ export function ShotTimeline({
                     data-broll-block={b.id}
                     style={{ left: r.start * pxPerSec, width: Math.max(8, (r.end - r.start) * pxPerSec) }}
                     title={b.valid ? `${b.phrase || b.description || "B-roll"} · ${r.start.toFixed(1)}–${r.end.toFixed(1)}s` : `Not rendered — ${b.reason}`}
-                    className={`group absolute top-1.5 h-[52px] rounded-md border overflow-hidden flex items-center gap-1 pl-1 pr-2 ${
+                    className={`group absolute top-1.5 h-[52px] rounded-md border overflow-hidden flex items-center gap-1.5 pr-2 ${
                       !b.valid
                         ? "border-red-500/60 bg-red-500/10 opacity-70"
                         : b.status === "suggested"
@@ -582,11 +582,20 @@ export function ShotTimeline({
                     onPointerCancel={(e) => endBlockDrag(e, b)}
                     onClick={(e) => e.stopPropagation()}
                   >
+                    {/* Like the VIDEO track: the frame fills the block's
+                        height at its own aspect, pinned left; the rest of
+                        the block is the violet slab */}
                     {b.clip ? (
                       /* eslint-disable-next-line @next/next/no-img-element */
-                      <img src={broll.thumbSrc(b.clip.filename)} alt="" className="h-10 w-7 shrink-0 rounded-sm object-cover bg-muted" loading="lazy" draggable={false} />
+                      <img
+                        src={broll.thumbSrc(b.clip.filename)}
+                        alt=""
+                        className="h-full w-auto max-w-[60%] shrink-0 object-contain object-left bg-muted"
+                        loading="lazy"
+                        draggable={false}
+                      />
                     ) : (
-                      <span className="h-10 w-7 shrink-0 rounded-sm border border-dashed border-violet-500/60" />
+                      <span className="h-full w-[30px] shrink-0 border-r border-dashed border-violet-500/60" />
                     )}
                     <div className="min-w-0">
                       <p className="text-[10px] font-semibold leading-tight truncate">
