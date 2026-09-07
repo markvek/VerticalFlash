@@ -3,7 +3,8 @@ import { execFileAsync, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { extractVideoId } from "@/lib/video-id";
-import { DOWNLOADS_DIR, RENDERS_DIR } from "@/lib/paths";
+import { RENDERS_DIR } from "@/lib/paths";
+import { resolveProjectFile } from "@/lib/download-files";
 
 // Poster frame for a downloaded video (?source=original, default) or its
 // remake render (?source=render). Cached as a jpg in a hidden .thumbs dir.
@@ -37,8 +38,10 @@ export async function GET(
     thumbsDir = join(RENDERS_DIR, ".thumbs");
     thumbPath = join(thumbsDir, `${videoId}.jpg`);
   } else {
-    videoPath = join(DOWNLOADS_DIR, filename);
-    thumbsDir = join(DOWNLOADS_DIR, ".thumbs");
+    const file = await resolveProjectFile(filename);
+    if (!file) return NextResponse.json({ error: "File not found" }, { status: 404 });
+    videoPath = file.path;
+    thumbsDir = join(file.directory, ".thumbs");
     thumbPath = join(thumbsDir, `${filename}.jpg`);
   }
 

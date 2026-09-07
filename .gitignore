@@ -33,6 +33,8 @@ performance-insights.json
 
 # Downloaded videos (local only)
 /downloads/
+/storyboards/
+/editing/
 /analysis/
 /library/
 /renders/

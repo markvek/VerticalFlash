@@ -147,6 +147,11 @@ export const ShotRecommendationsZ = z.object({
       // locked = preserve the current product/clip, recycle = find a new
       // library clip, generate = make a new AI clip for this shot.
       edit_intent: z.enum(EDIT_INTENTS).nullable().optional(),
+      // true = render this shot from the project's own source video at the
+      // shot's start_time/end_time, not from a library clip (storyboard
+      // cutdowns set this for beats that show the speaker; any project can
+      // flip it per shot). A fix note that names a clip still wins.
+      keep_source: z.boolean().nullable().optional(),
     })
   ),
   usage: z

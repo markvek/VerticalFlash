@@ -1,7 +1,9 @@
 "use client";
 
-import { useParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { playMedia } from "@/lib/media-playback";
+
+import { useParams, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
 import {
   GEMINI_PRICE_IN_PER_M,
   GEMINI_PRICE_OUT_PER_M,
@@ -14,7 +16,21 @@ import {
 } from "@/components/form/GenerationPanel";
 import { extractVideoId } from "@/lib/video-id";
 import { MusicPicker } from "@/components/form/MusicPicker";
+import { StoryboardPanel } from "@/components/form/StoryboardPanel";
+import { ShotTimeline, type TimelineResize } from "@/components/data/ShotTimeline";
 import type { DownloadEntryProject } from "@/lib/download-types";
+import {
+  footageToShortTime,
+  shortToFootageTime,
+  type RetimeEdit,
+} from "@/lib/shot-retime";
+import {
+  endsSentence,
+  LEAD_SECONDS,
+  startsSentence,
+  TAIL_SECONDS,
+} from "@/lib/word-range";
+import type { Sentence, Word } from "@/lib/segments-schema";
 
 type AudioMode = "music" | "original" | "none";
 
@@ -28,6 +44,11 @@ interface AnalysisShot {
   camera_style: string;
   tags?: string[];
   screenshot: string;
+  // Cutdowns: where the shot lives in the footage (master or an attached
+  // clip named by source_clip); the render cuts from there
+  source_start?: number;
+  source_end?: number;
+  source_clip?: string;
 }
 
 interface Recommendation {
@@ -58,6 +79,9 @@ interface ShotRecommendations {
     shot_index: number;
     recommendations: Recommendation[];
     selected_filename?: string | null;
+    // true = render from the source video at the shot's own time (no
+    // library clip); set by storyboard cutdowns and the per-shot toggle
+    keep_source?: boolean | null;
   }>;
 }
 
@@ -73,7 +97,12 @@ interface RenderShot {
   end_time: number;
   duration: number;
   clip: string | null;
-  clip_source: "selected" | "top_recommendation" | "generated" | "none";
+  clip_source:
+    | "selected"
+    | "top_recommendation"
+    | "generated"
+    | "source"
+    | "none";
   trim_start: number | null;
   trim_end: number | null;
   moment_note: string | null;
@@ -162,6 +191,8 @@ interface CaptionsData {
   captions: Array<{ text: string; angle: string }>;
   hashtags: CaptionHashtag[];
   tikhubChecked: boolean;
+  // The concept the creator typed when these were generated, if any
+  concept?: string | null;
 }
 
 const ZONE_BADGES: Record<
@@ -210,6 +241,10 @@ const CLIP_SOURCE_BADGES: Record<
     label: "⚡ AI generated",
     className: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
   },
+  source: {
+    label: "original footage",
+    className: "bg-sky-500/15 text-sky-700 dark:text-sky-400",
+  },
   none: {
     label: "gap",
     className: "bg-red-500/15 text-red-600 dark:text-red-400",
@@ -239,10 +274,38 @@ interface Analysis {
   };
   taggedAt?: string;
   tagModel?: string;
+  // Set by timeline edits; a render older than this is stale
+  shotsEditedAt?: string;
 }
 
 // Timeline scale: pixels per second of video
 const PX_PER_SEC = 56;
+
+// Storyboard section of a cutdown's beat (beats map 1:1 to shots in order)
+const SECTION_BADGES: Record<
+  "hook" | "main" | "end",
+  { label: string; className: string }
+> = {
+  hook: { label: "Hook", className: "bg-primary/15 text-primary" },
+  main: { label: "Main", className: "bg-muted text-muted-foreground" },
+  end: {
+    label: "End",
+    className: "bg-green-500/15 text-green-600 dark:text-green-400",
+  },
+};
+
+// The brief-based project kinds (started from /create with a prompt + song)
+const isBriefProject = (
+  p: DownloadEntryProject | null
+): p is Extract<DownloadEntryProject, { kind: "music" | "prompt" }> =>
+  p?.kind === "music" || p?.kind === "prompt";
+
+const timingLabel = (engine: "whisperx" | "gemini" | null | undefined) =>
+  engine === "whisperx"
+    ? "timing: WhisperX"
+    : engine === "gemini"
+      ? "timing: Gemini (approximate)"
+      : "timing: default";
 
 // Generated clips live in generated/<videoId>/, not the clip library
 // (same regex as isGeneratedClip in src/lib/generation-schema.ts, local so
@@ -259,8 +322,16 @@ function formatCost(usage?: Analysis["usage"]): string | null {
   return `$${cost.toFixed(2)}`;
 }
 
-export default function VideoViewerPage() {
+// "0:04.2"-style clock for the shot cards
+function fmtClock(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds - m * 60;
+  return `${m}:${s.toFixed(1).padStart(4, "0")}`;
+}
+
+function VideoViewerContent() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const filename = decodeURIComponent(params.filename as string);
   const videoId = extractVideoId(filename);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -285,8 +356,10 @@ export default function VideoViewerPage() {
   const [allClipsOpen, setAllClipsOpen] = useState(false);
   const [trimmingShot, setTrimmingShot] = useState<number | null>(null);
   const [panelTab, setPanelTab] = useState<
-    "video" | "clips" | "render" | "captions"
+    "video" | "clips" | "storyboards" | "render" | "captions"
   >("video");
+  // Master projects open their saved storyboards once analysis has loaded.
+  const tabParamApplied = useRef(false);
   const [loopShot, setLoopShot] = useState(false);
   const [render, setRender] = useState<RenderManifest | null>(null);
   const [rendering, setRendering] = useState(false);
@@ -306,6 +379,8 @@ export default function VideoViewerPage() {
   const [captionsLoading, setCaptionsLoading] = useState(false);
   const [captionsError, setCaptionsError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  // Free-text direction for the caption writer (sent with the request)
+  const [captionConcept, setCaptionConcept] = useState("");
   const [scriptOpen, setScriptOpen] = useState(false);
   const [editNotes, setEditNotes] = useState<Record<string, string>>({});
   const [noteShot, setNoteShot] = useState<number | null>(null);
@@ -324,12 +399,60 @@ export default function VideoViewerPage() {
   const [displayName, setDisplayName] = useState("");
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+  // Timeline re-timing in flight
+  const [retiming, setRetiming] = useState(false);
+  // A cutdown's master transcript, for snapping drags to words
+  const [masterSegs, setMasterSegs] = useState<{ words: Word[]; sentences: Sentence[] } | null>(null);
+  const [masterDuration, setMasterDuration] = useState<number | null>(null);
+
+  // A cutdown whose shots all live in the master plays the master directly
+  // and hops between the shots' footage ranges, so a length change on the
+  // timeline previews without re-cutting anything
+  const masterBacked =
+    project?.kind === "cutdown" &&
+    !!analysis &&
+    analysis.shots.length > 0 &&
+    analysis.shots.every((s) => s.source_start != null && s.source_end != null && !s.source_clip);
+  const beatMap = masterBacked
+    ? analysis!.shots.map((s) => ({
+        source_start: s.source_start!,
+        source_end: s.source_end!,
+        start: s.start_time,
+        end: s.end_time,
+      }))
+    : [];
+  // The player's own time for a shot's start
+  const playerTimeFor = (index: number): number => {
+    const s = analysis?.shots[index];
+    if (!s) return 0;
+    return masterBacked ? s.source_start! : s.start_time;
+  };
 
   useEffect(() => {
-    // Use the API route to serve the video file
-    setVideoUrl(`/api/downloads/${encodeURIComponent(filename)}`);
+    // Use the API route to serve the video file (the master for a
+    // master-backed cutdown)
+    setVideoUrl(
+      masterBacked && project?.kind === "cutdown"
+        ? `/api/downloads/${encodeURIComponent(project.masterFilename)}`
+        : `/api/downloads/${encodeURIComponent(filename)}`
+    );
     setPlaybackError(false);
-  }, [filename]);
+  }, [filename, masterBacked, project]);
+
+  // The master's word timing, for word snapping on the timeline
+  useEffect(() => {
+    if (project?.kind !== "cutdown") return;
+    let cancelled = false;
+    fetch(`/api/master/${project.masterId}/segments`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setMasterSegs({ words: data.words ?? [], sentences: data.sentences ?? [] });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [project]);
 
   // TikTok connection state (single account; also surfaces the OAuth
   // redirect result via ?tiktok_connected / ?tiktok_error)
@@ -415,8 +538,13 @@ export default function VideoViewerPage() {
         const proj: DownloadEntryProject | null = file?.project ?? null;
         setProject(proj);
         // A song project defaults to its song unless a render already
-        // chose otherwise
-        if (proj?.music && !audioInitialized.current) {
+        // chose otherwise; masters and cutdowns keep "original" (the
+        // speaker's voice is the point)
+        if (
+          isBriefProject(proj) &&
+          proj.music &&
+          !audioInitialized.current
+        ) {
           setAudioMode("music");
           setMusicFilename(proj.music.filename);
         }
@@ -503,7 +631,10 @@ export default function VideoViewerPage() {
     fetch(`/api/analyze/${videoId}/captions`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (!cancelled && data) setCaptions(data);
+        if (!cancelled && data) {
+          setCaptions(data);
+          if (data.concept) setCaptionConcept(data.concept);
+        }
       })
       .catch(() => {});
     return () => {
@@ -525,6 +656,14 @@ export default function VideoViewerPage() {
     }
   }, [selectedShot, analysis]);
 
+  // Both legacy Downloads links and Storyboarding links open the saved ideas.
+  useEffect(() => {
+    if (tabParamApplied.current) return;
+    if (!analysis || project?.kind !== "master") return;
+    tabParamApplied.current = true;
+    setPanelTab("storyboards");
+  }, [analysis, project, searchParams]);
+
   // Space toggles play/pause anywhere on the page (except while an
   // interactive element is focused — buttons/inputs keep native behavior)
   useEffect(() => {
@@ -541,7 +680,7 @@ export default function VideoViewerPage() {
       e.preventDefault();
       const video = videoRef.current;
       if (!video) return;
-      if (video.paused) video.play().catch(() => {});
+      if (video.paused) playMedia(video).catch(() => {});
       else video.pause();
     };
     window.addEventListener("keydown", onKey);
@@ -686,6 +825,8 @@ export default function VideoViewerPage() {
     try {
       const res = await fetch(`/api/analyze/${videoId}/captions`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ concept: captionConcept.trim() || null }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -743,7 +884,7 @@ export default function VideoViewerPage() {
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) video.play().catch(() => {});
+    if (video.paused) playMedia(video).catch(() => {});
     else video.pause();
   };
 
@@ -761,8 +902,8 @@ export default function VideoViewerPage() {
       setPlayheadTime(analysis.shots[clamped].start_time);
       const video = videoRef.current;
       if (video) {
-        video.currentTime = analysis.shots[clamped].start_time;
-        video.play().catch(() => {});
+        video.currentTime = playerTimeFor(clamped);
+        playMedia(video).catch(() => {});
       }
     }
   };
@@ -774,13 +915,48 @@ export default function VideoViewerPage() {
     if (!video) return;
     const t = video.currentTime;
 
+    // Master-backed cutdown: the player runs on the master, so hop between
+    // the shots' footage ranges and map its time onto the short's timeline
+    if (masterBacked) {
+      const beat = beatMap[selectedShot];
+      if (!beat) return;
+      if (t >= beat.source_end - 0.02) {
+        if (loopShot) {
+          video.currentTime = beat.source_start;
+          setPlayheadTime(beat.start);
+          return;
+        }
+        const next = beatMap[selectedShot + 1];
+        if (next) {
+          setSelectedShot(selectedShot + 1);
+          video.currentTime = next.source_start;
+          setPlayheadTime(next.start);
+        } else {
+          video.pause();
+          setPlayheadTime(beat.end);
+        }
+        return;
+      }
+      if (t < beat.source_start - 0.05) {
+        // Scrubbed with the native controls: follow whichever shot the
+        // master time falls in, else stay put
+        const mapped = footageToShortTime(beatMap, t);
+        if (mapped) {
+          setSelectedShot(mapped.index);
+          setPlayheadTime(mapped.time);
+        }
+        return;
+      }
+      setPlayheadTime(beat.start + (t - beat.source_start));
+      return;
+    }
+
     // Loop mode: cycle the selected shot instead of playing through
     if (loopShot) {
       const s = analysis.shots[selectedShot];
       if (s && (t >= s.end_time || t < s.start_time - 0.05)) {
         video.currentTime = s.start_time;
         setPlayheadTime(s.start_time);
-        video.play().catch(() => {});
         return;
       }
       setPlayheadTime(t);
@@ -794,7 +970,57 @@ export default function VideoViewerPage() {
     if (idx !== -1 && idx !== selectedShot) setSelectedShot(idx);
   };
 
-  // Turning the loop on restarts both players at their loop-in points
+  // Timeline drag: persist the new shot times (the server re-lays the
+  // cutdown's timeline and refreshes the affected frames)
+  const patchShotTimes = async (edit: RetimeEdit) => {
+    if (!videoId || retiming) return;
+    setRetiming(true);
+    try {
+      const res = await fetch(`/api/analyze/${videoId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shots: [edit] }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Re-timing the shot failed");
+      setAnalysis(data);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Re-timing the shot failed");
+    } finally {
+      setRetiming(false);
+    }
+  };
+
+  // Pull a dragged footage time onto the nearest word boundary (the same
+  // lead/tail the storyboard cut uses) and flag mid-sentence landings
+  const snapToWords = (
+    _index: number,
+    edge: "start" | "end",
+    t: number
+  ): { time: number; midSentence: boolean } | null => {
+    if (!masterSegs?.words.length) return null;
+    const { words, sentences } = masterSegs;
+    if (edge === "end") {
+      let w = -1;
+      for (let i = 0; i < words.length; i++) {
+        if (words[i].end <= t + 0.3) w = i;
+        else break;
+      }
+      if (w < 0) return null;
+      const next = words[w + 1];
+      const time = Math.min(words[w].end + TAIL_SECONDS, next ? next.start : Infinity);
+      if (Math.abs(time - t) > 0.4) return null;
+      return { time, midSentence: !endsSentence(sentences, words[w].i) };
+    }
+    const w = words.findIndex((x) => x.start >= t - 0.3);
+    if (w < 0) return null;
+    const prev = words[w - 1];
+    const time = Math.max(words[w].start - LEAD_SECONDS, prev ? prev.end : 0);
+    if (Math.abs(time - t) > 0.4) return null;
+    return { time, midSentence: !startsSentence(sentences, words[w].i) };
+  };
+
+  // Looping changes playback behavior without starting another player.
   const toggleLoopShot = () => {
     const next = !loopShot;
     setLoopShot(next);
@@ -802,14 +1028,12 @@ export default function VideoViewerPage() {
     const s = analysis?.shots[selectedShot];
     const video = videoRef.current;
     if (video && s) {
-      video.currentTime = s.start_time;
+      video.currentTime = playerTimeFor(selectedShot);
       setPlayheadTime(s.start_time);
-      video.play().catch(() => {});
     }
     const preview = previewVideoRef.current;
     if (preview) {
       preview.currentTime = previewClip?.start ?? 0;
-      preview.play().catch(() => {});
     }
   };
 
@@ -832,6 +1056,43 @@ export default function VideoViewerPage() {
       alert(error instanceof Error ? error.message : "Selection failed");
       return null;
     }
+  };
+
+  // Flip the current shot between its original footage and a library clip
+  const patchKeepSource = async (keepSource: boolean) => {
+    if (!videoId) return;
+    try {
+      const res = await fetch(`/api/analyze/${videoId}/recommendations`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shot_index: selectedShot,
+          keep_source: keepSource,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Saving the toggle failed");
+      setRecs(data);
+    } catch (error) {
+      alert(
+        error instanceof Error ? error.message : "Saving the toggle failed"
+      );
+    }
+  };
+
+  // Seek the main player to a time (storyboard beats, shot cards)
+  const seekTo = (seconds: number, _source?: unknown, request?: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (masterBacked) {
+      const idx = beatMap.findIndex((b) => seconds >= b.start && seconds < b.end);
+      if (idx !== -1) setSelectedShot(idx);
+      video.currentTime = shortToFootageTime(beatMap, seconds);
+    } else {
+      video.currentTime = seconds;
+    }
+    setPlayheadTime(seconds);
+    playMedia(video, request).catch(() => {});
   };
 
   // Confirm (or clear) the previewed clip as this shot's replacement
@@ -924,10 +1185,17 @@ export default function VideoViewerPage() {
   const selectedByShot = new Map(
     (recs?.shots || []).map((s) => [s.shot_index, s.selected_filename ?? null])
   );
+  const keepSourceByShot = new Map(
+    (recs?.shots || []).map((s) => [s.shot_index, s.keep_source === true])
+  );
   const selectedRecs = recsByShot.get(selectedShot) || [];
   const selectedClipFilename =
     recs?.shots.find((s) => s.shot_index === selectedShot)
       ?.selected_filename ?? null;
+  const selectedKeepSource = keepSourceByShot.get(selectedShot) === true;
+  // Cutdown beats map 1:1 to shots, so a shot's section is its beat's
+  const sectionForShot = (index: number) =>
+    project?.kind === "cutdown" ? (project.beats[index]?.section ?? null) : null;
 
   // Media URLs branch on where the clip lives (library vs generated)
   const thumbSrc = (clipFilename: string) =>
@@ -945,6 +1213,8 @@ export default function VideoViewerPage() {
   const gapForShot = (index: number): boolean => {
     const s = analysis?.shots[index];
     if (!s || !recs) return false;
+    // Original footage always covers its own shot
+    if (keepSourceByShot.get(index)) return false;
     const duration = s.end_time - s.start_time;
     const shotRecs = recsByShot.get(index) || [];
     const sel = selectedByShot.get(index);
@@ -957,16 +1227,38 @@ export default function VideoViewerPage() {
 
   const textStyle = textOverlays?.style ?? DEFAULT_TEXT_STYLE;
 
+  // Shot frames are regenerated in place by timeline edits; bust the cache
+  const shotThumb = (s: AnalysisShot) =>
+    analysis?.shotsEditedAt ? `${s.screenshot}?v=${encodeURIComponent(analysis.shotsEditedAt)}` : s.screenshot;
+
+  // Draggable shot boundaries: footage ranges for cutdowns, split points
+  // for everything else
+  const timelineResize: TimelineResize | null =
+    videoId && analysis
+      ? {
+          mode: project?.kind === "cutdown" ? "source" : "split",
+          footageMax: masterBacked && masterDuration ? masterDuration : undefined,
+          busy: retiming,
+          onCommit: patchShotTimes,
+          snap: masterBacked && masterSegs?.words.length ? snapToWords : undefined,
+        }
+      : null;
+  const renderStale =
+    !!render &&
+    !!analysis?.shotsEditedAt &&
+    new Date(render.renderedAt).getTime() < new Date(analysis.shotsEditedAt).getTime();
+
   // What a render would use per shot: your pick, the top match, or nothing
   const renderBreakdown = recs
     ? recs.shots.reduce(
         (acc, s) => {
-          if (s.selected_filename) acc.selected += 1;
+          if (s.keep_source) acc.source += 1;
+          else if (s.selected_filename) acc.selected += 1;
           else if (s.recommendations.length > 0) acc.fallback += 1;
           else acc.none += 1;
           return acc;
         },
-        { selected: 0, fallback: 0, none: 0 }
+        { source: 0, selected: 0, fallback: 0, none: 0 }
       )
     : null;
 
@@ -981,7 +1273,7 @@ export default function VideoViewerPage() {
         {(
           [
             ["none", "None"],
-            ["original", project ? "Placeholder track" : "Original"],
+            ["original", isBriefProject(project) ? "Placeholder track" : "Original"],
             ["music", "Song"],
           ] as Array<[AudioMode, string]>
         ).map(([mode, label]) => (
@@ -1021,10 +1313,69 @@ export default function VideoViewerPage() {
     </div>
   );
 
-  // Title, filename, and Gemini actions — shown standalone before an
-  // analysis exists, and at the top of the "Video info" tab afterwards
-  const headerActions = (
-    <>
+  // Per-shot fix note: the inline editor (Save & re-render / Save only) or
+  // the "✎ Add fix note" chip that opens it. `flagged` tints the chip when
+  // the shot needs attention (a render gap, no clip, a skipped clip)
+  const noteEditor = (shotIndex: number, flagged: boolean) =>
+    noteShot === shotIndex ? (
+      <div className="flex flex-col gap-1 mt-0.5">
+        <textarea
+          autoFocus
+          value={noteDraft}
+          onChange={(e) => setNoteDraft(e.target.value)}
+          rows={2}
+          maxLength={500}
+          placeholder='How should this shot be fixed? e.g. "loop the clip to fill the shot", "use IMG_0072 and start at 3s", "reuse the clip from shot 3". Save empty to clear.'
+          className="w-full text-xs rounded-md border border-border bg-transparent p-1.5 outline-none focus:border-primary resize-y"
+        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => saveNoteAndRender(shotIndex)}
+            disabled={noteSaving || rendering}
+            className="px-2 py-1 rounded-md bg-primary text-primary-foreground text-[10px] font-semibold disabled:opacity-60"
+          >
+            {rendering
+              ? "Rendering…"
+              : noteSaving
+                ? "Saving…"
+                : "Save & re-render"}
+          </button>
+          <button
+            onClick={() => saveNote(shotIndex)}
+            disabled={noteSaving || rendering}
+            className="px-2 py-1 rounded-md border border-border text-[10px] font-semibold text-foreground hover:bg-muted/40 disabled:opacity-60"
+          >
+            Save only
+          </button>
+          <button
+            onClick={() => setNoteShot(null)}
+            className="text-[10px] text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    ) : (
+      <button
+        onClick={() => {
+          setNoteShot(shotIndex);
+          setNoteDraft(editNotes[String(shotIndex)] || "");
+        }}
+        className={`self-start text-left text-[10px] mt-0.5 rounded-md px-1.5 py-0.5 border transition-colors ${
+          editNotes[String(shotIndex)]
+            ? "border-primary/40 text-primary hover:bg-primary/10"
+            : flagged
+              ? "border-yellow-500/50 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-500/10"
+              : "border-border text-muted-foreground hover:text-foreground hover:bg-muted/40"
+        }`}
+      >
+        ✎ {editNotes[String(shotIndex)] || "Add fix note"}
+      </button>
+    );
+
+  // Title + filename: above the tabs once an analysis exists, standalone
+  // (with the Gemini action) before one
+  const titleBlock = (
       <div>
         {editingName ? (
           <input
@@ -1049,7 +1400,7 @@ export default function VideoViewerPage() {
             title="Click to rename"
           >
             <h1 className="text-lg font-bold text-foreground truncate">
-              {displayName || "Download"}
+              Editing - {displayName || "Download"}
             </h1>
             <span className="text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
               ✎ rename
@@ -1062,34 +1413,71 @@ export default function VideoViewerPage() {
         <p className="text-xs text-muted-foreground mt-0.5">
           {project?.kind === "music"
             ? `Song project · ${project.music?.title ?? ""}${project.music?.author ? ` — ${project.music.author}` : ""} · ${project.targetDuration}s • Tap to play/pause`
-            : project
+            : project?.kind === "prompt"
               ? `Idea project · ${project.targetDuration}s • Tap to play/pause`
-              : "Downloaded video • Tap to play/pause"}
+              : project?.kind === "master"
+                ? `Master · ${project.sourceClips.length} source clip${project.sourceClips.length === 1 ? "" : "s"} · ${timingLabel(project.timingEngine)} • Tap to play/pause`
+                : project?.kind === "cutdown"
+                  ? `Short from master · ${project.targetDuration}s · ${project.beats.length} beat${project.beats.length === 1 ? "" : "s"} · ${timingLabel(project.timingSource)} • Tap to play/pause`
+                  : "Downloaded video • Tap to play/pause"}
+          {project?.kind === "cutdown" && (
+            <>
+              {" · "}
+              <a
+                href={`/downloads/${encodeURIComponent(project.masterFilename)}`}
+                className="underline hover:text-foreground"
+              >
+                Open master
+              </a>
+            </>
+          )}
         </p>
-        {project?.prompt && (
+        {isBriefProject(project) && project.prompt && (
           <p className="text-xs text-foreground/80 mt-1 line-clamp-3">
             {project.prompt}
           </p>
         )}
+        {project?.kind === "cutdown" && project.hookLine && (
+          <p className="text-xs text-foreground/80 mt-1 line-clamp-3">
+            {project.hookLine}
+          </p>
+        )}
       </div>
+  );
 
+  // The Gemini pipeline (analyze → match B-roll → tag → render) and the
+  // render settings — the Render Details tab, or standalone before analysis
+  const actionButtonClass =
+    "w-full px-4 py-2 text-base bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed";
+  const geminiActions = (
+    <div className="flex flex-col gap-3">
       {videoId && (
         <button
           onClick={handleAnalyze}
           disabled={analyzing}
-          className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          className={actionButtonClass}
         >
-          {analyzing
-            ? project
-              ? "Planning shots with Gemini… (can take a minute)"
-              : "Analyzing with Gemini… (can take a minute)"
-            : analysis
-              ? project
-                ? "Re-plan shots with Gemini"
-                : "Re-process with Gemini"
-              : project
-                ? "Plan shots with Gemini"
-                : "Process with Gemini"}
+          {project?.kind === "master"
+            ? analyzing
+              ? "Analyzing master… (transcribe + segment, can take a few minutes)"
+              : analysis
+                ? "Re-analyze master"
+                : "Analyze master (transcribe + segment)"
+            : project?.kind === "cutdown"
+              ? analyzing
+                ? "Rebuilding shots from storyboard…"
+                : "Rebuild shots from storyboard"
+              : analyzing
+                ? project
+                  ? "Planning shots with Gemini… (can take a minute)"
+                  : "Analyzing with Gemini… (can take a minute)"
+                : analysis
+                  ? project
+                    ? "Re-plan shots with Gemini"
+                    : "Re-process video with Gemini"
+                  : project
+                    ? "Plan shots with Gemini"
+                    : "Process video with Gemini"}
         </button>
       )}
 
@@ -1097,13 +1485,13 @@ export default function VideoViewerPage() {
         <button
           onClick={handleMatch}
           disabled={matching}
-          className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          className={actionButtonClass}
         >
           {matching
-            ? "Matching library clips…"
+            ? "Matching recommended B-roll clips…"
             : recs
-              ? "Re-match library clips"
-              : "Match library clips"}
+              ? "Re-match recommended B-roll clips"
+              : "Match recommended B-roll clips"}
         </button>
       )}
 
@@ -1111,28 +1499,31 @@ export default function VideoViewerPage() {
         <button
           onClick={handleGenerateTags}
           disabled={tagging}
-          className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          className={actionButtonClass}
         >
           {tagging
             ? "Tagging shots…"
             : analysis.taggedAt
-              ? "Re-tag shots"
+              ? "Re-generate shot tags"
               : "Generate shot tags"}
         </button>
       )}
 
-      {videoId && analysis && recs && (
-        <div className="flex flex-col gap-1">
+      {videoId && analysis && (
+        <div className="flex flex-col gap-3">
           <button
             onClick={handleRender}
-            disabled={rendering}
-            className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            disabled={rendering || !recs}
+            title={
+              recs ? undefined : "Match recommended B-roll clips first"
+            }
+            className={actionButtonClass}
           >
             {rendering
-              ? "Rendering remake… (~1 min)"
+              ? "Rendering video… (~1 min)"
               : render
-                ? "Re-render remake"
-                : "Render remake"}
+                ? "Re-render video"
+                : "Render video"}
           </button>
           {audioControls}
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
@@ -1154,7 +1545,7 @@ export default function VideoViewerPage() {
                   }
                   disabled={textSaving}
                   aria-label="Text style preset"
-                  className="text-xs rounded-md border border-border bg-transparent px-1.5 py-1 outline-none focus:border-primary disabled:opacity-60"
+                  className="text-xs rounded-lg border border-border bg-transparent px-1.5 py-1 outline-none focus:border-primary disabled:opacity-60"
                 >
                   <option value="tiktok_box">TikTok box</option>
                   <option value="outline">Bold outline</option>
@@ -1170,7 +1561,7 @@ export default function VideoViewerPage() {
                   }
                   disabled={textSaving}
                   aria-label="Text position"
-                  className="text-xs rounded-md border border-border bg-transparent px-1.5 py-1 outline-none focus:border-primary disabled:opacity-60"
+                  className="text-xs rounded-lg border border-border bg-transparent px-1.5 py-1 outline-none focus:border-primary disabled:opacity-60"
                 >
                   <option value="top">Upper third</option>
                   <option value="center">Center</option>
@@ -1178,7 +1569,7 @@ export default function VideoViewerPage() {
                 </select>
               </div>
               <p className="text-[10px] text-muted-foreground">
-                Edit each shot&apos;s text in the Library clips tab · burned as
+                Edit each shot&apos;s text in the B-Roll Clips tab · burned as
                 ASS subtitles
               </p>
             </div>
@@ -1188,6 +1579,8 @@ export default function VideoViewerPage() {
               {renderBreakdown.selected} shot
               {renderBreakdown.selected === 1 ? "" : "s"} use your selected
               clip · {renderBreakdown.fallback} fall back to the top match
+              {renderBreakdown.source > 0 &&
+                ` · ${renderBreakdown.source} use original footage`}
               {renderBreakdown.none > 0 &&
                 ` · ${renderBreakdown.none} have no match`}
             </p>
@@ -1234,18 +1627,107 @@ export default function VideoViewerPage() {
           </p>
         </div>
       )}
-    </>
+    </div>
   );
-  const totalDuration = analysis?.shots.length
-    ? analysis.shots[analysis.shots.length - 1].end_time
-    : 0;
+
+  // Video Editing / B-Roll Clips / (Storyboards) / Render Details / Captions
+  const tabClass = (tab: typeof panelTab, first = false) =>
+    `px-4 py-2 transition-colors ${first ? "" : "border-l border-border "}${
+      panelTab === tab
+        ? "bg-primary/15 text-primary"
+        : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+    }`;
+  const tabBar = (
+    <div className="flex rounded-lg border border-border overflow-hidden self-start text-xs font-semibold">
+      <button onClick={() => setPanelTab("video")} className={tabClass("video", true)}>
+        Video Editing
+      </button>
+      <button onClick={() => setPanelTab("clips")} className={tabClass("clips")}>
+        B-Roll Clips
+      </button>
+      {project?.kind === "master" && (
+        <button
+          onClick={() => setPanelTab("storyboards")}
+          className={tabClass("storyboards")}
+        >
+          Storyboards
+        </button>
+      )}
+      <button onClick={() => setPanelTab("render")} className={tabClass("render")}>
+        Render Details
+      </button>
+      <button
+        onClick={() => setPanelTab("captions")}
+        className={tabClass("captions")}
+      >
+        Captions
+      </button>
+    </div>
+  );
+
+  // The Gemini analysis summary (format, hook, tags, music, cost)
+  const analysisCard = analysis && (
+    <div className="rounded-lg border border-border p-4 flex flex-col gap-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="px-2 py-0.5 rounded-full bg-primary/15 text-primary text-xs font-semibold uppercase tracking-wide">
+          {analysis.format}
+        </span>
+        <span className="text-xs text-muted-foreground">
+          analyzed {new Date(analysis.analyzedAt).toLocaleString()}
+        </span>
+      </div>
+      <p className="text-sm text-foreground">{analysis.summary}</p>
+      <div>
+        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          Hook
+        </p>
+        <p className="text-sm text-foreground mt-0.5">
+          {analysis.hook_description}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {analysis.tags.map((tag) => (
+          <span
+            key={tag}
+            className="px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-xs"
+          >
+            {tag}
+          </span>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        🎵{" "}
+        {analysis.music.title
+          ? `${analysis.music.title} — ${analysis.music.author} · `
+          : ""}
+        {analysis.music.usage.replaceAll("_", " ")}
+        {analysis.music.usage_note && ` · ${analysis.music.usage_note}`}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {analysis.model}
+        {analysis.usage?.totalTokens
+          ? ` · ${analysis.usage.totalTokens.toLocaleString()} tokens`
+          : ""}
+        {cost ? ` · est. ${cost}` : ""}
+      </p>
+    </div>
+  );
+
 
   return (
     <div className="downloads-layout flex flex-col items-center min-h-screen p-4 bg-background text-foreground">
       <div
         className={`flex flex-col gap-6 w-full ${analysis ? "" : "max-w-sm"}`}
       >
-        {/* Ribbon 1: video player + general info */}
+        {/* Title + tab strip span the player and the panel */}
+        {analysis && (
+          <div className="flex flex-col gap-3 -mb-2">
+            {titleBlock}
+            {tabBar}
+          </div>
+        )}
+
+        {/* Ribbon 1: video player + the active tab's panel */}
         <div className={analysis ? "grid gap-4 md:grid-cols-[minmax(0,320px)_1fr]" : "flex flex-col gap-4"}>
           <div className="flex flex-col gap-4">
             <div className="rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center">
@@ -1267,10 +1749,17 @@ export default function VideoViewerPage() {
                     width="100%"
                     height="100%"
                     controls
-                    autoPlay
+                    playsInline
+                    preload="metadata"
                     className="w-full h-full object-contain"
                     onError={() => setPlaybackError(true)}
                     onTimeUpdate={handleTimeUpdate}
+                    onLoadedMetadata={(e) => {
+                      if (masterBacked) {
+                        setMasterDuration(e.currentTarget.duration);
+                        e.currentTarget.currentTime = playerTimeFor(selectedShot);
+                      }
+                    }}
                   >
                     <source src={videoUrl} type="video/mp4" />
                     Your browser does not support the video tag.
@@ -1281,122 +1770,133 @@ export default function VideoViewerPage() {
           </div>
 
           <div className="flex flex-col gap-3 min-w-0">
-            {!analysis && headerActions}
+            {!analysis && (
+              <>
+                {titleBlock}
+                {geminiActions}
+              </>
+            )}
 
             {analysis && (
               <div className="flex flex-col gap-3 min-w-0">
-                <div className="flex rounded-lg border border-border overflow-hidden self-start text-xs font-semibold">
-                  <button
-                    onClick={() => setPanelTab("video")}
-                    className={`px-4 py-2 transition-colors ${
-                      panelTab === "video"
-                        ? "bg-primary/15 text-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                    }`}
-                  >
-                    Video info
-                  </button>
-                  <button
-                    onClick={() => setPanelTab("clips")}
-                    className={`px-4 py-2 border-l border-border transition-colors ${
-                      panelTab === "clips"
-                        ? "bg-primary/15 text-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                    }`}
-                  >
-                    Library clips
-                  </button>
-                  {render && (
-                    <button
-                      onClick={() => setPanelTab("render")}
-                      className={`px-4 py-2 border-l border-border transition-colors ${
-                        panelTab === "render"
-                          ? "bg-primary/15 text-primary"
-                          : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                      }`}
-                    >
-                      Remake render
-                    </button>
-                  )}
-                  <button
-                    onClick={() => setPanelTab("captions")}
-                    className={`px-4 py-2 border-l border-border transition-colors ${
-                      panelTab === "captions"
-                        ? "bg-primary/15 text-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                    }`}
-                  >
-                    Captions
-                  </button>
-                </div>
-
+                {/* Video Editing: one card per shot — time, section, what
+                    happens, the fix note, and the text on/under the shot */}
                 {panelTab === "video" && (
-                  <>
-                    {headerActions}
-              <div className="rounded-lg border border-border p-4 flex flex-col gap-3">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="px-2 py-0.5 rounded-full bg-primary/15 text-primary text-xs font-semibold uppercase tracking-wide">
-                    {analysis.format}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    analyzed {new Date(analysis.analyzedAt).toLocaleString()}
-                  </span>
-                </div>
-                <p className="text-sm text-foreground">{analysis.summary}</p>
-                <div>
-                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                    Hook
-                  </p>
-                  <p className="text-sm text-foreground mt-0.5">
-                    {analysis.hook_description}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {analysis.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-xs"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  🎵{" "}
-                  {analysis.music.title
-                    ? `${analysis.music.title} — ${analysis.music.author} · `
-                    : ""}
-                  {analysis.music.usage.replaceAll("_", " ")}
-                  {analysis.music.usage_note &&
-                    ` · ${analysis.music.usage_note}`}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {analysis.model}
-                  {analysis.usage?.totalTokens
-                    ? ` · ${analysis.usage.totalTokens.toLocaleString()} tokens`
-                    : ""}
-                  {cost ? ` · est. ${cost}` : ""}
-                </p>
-              </div>
-                  </>
+                  <div className="flex gap-3 overflow-x-auto pb-2 items-stretch">
+                    {analysis.shots.map((s) => {
+                      const section = sectionForShot(s.index);
+                      const spoken = s.spoken_text.trim();
+                      const onScreen = s.on_screen_text.trim();
+                      return (
+                        <div
+                          key={s.index}
+                          className={`flex flex-col gap-1.5 shrink-0 w-[250px] rounded-lg border p-2.5 transition-colors ${
+                            s.index === selectedShot
+                              ? "border-primary/50 bg-primary/5"
+                              : "border-border"
+                          }`}
+                        >
+                          <button
+                            onClick={() => selectShot(s.index)}
+                            title={
+                              s.index === selectedShot
+                                ? "Play / pause"
+                                : `Play shot ${s.index + 1}`
+                            }
+                            className="self-center rounded overflow-hidden bg-black border border-border hover:border-primary transition-colors"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={shotThumb(s)}
+                              alt={`Shot ${s.index + 1}`}
+                              className="h-32 w-[81px] object-cover"
+                              loading="lazy"
+                            />
+                          </button>
+                          <div className="flex items-center gap-2 flex-wrap pt-1">
+                            <span className="text-[10px] font-mono text-muted-foreground">
+                              {fmtClock(s.start_time)}–{fmtClock(s.end_time)}
+                            </span>
+                            {section ? (
+                              <span
+                                className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide ${SECTION_BADGES[section].className}`}
+                              >
+                                {SECTION_BADGES[section].label}
+                              </span>
+                            ) : (
+                              <span className="px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground text-[10px] uppercase">
+                                {s.camera_style.replaceAll("_", " ")}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-muted-foreground leading-snug line-clamp-2">
+                            {s.description}
+                          </p>
+                          {noteEditor(s.index, gapForShot(s.index))}
+                          {spoken ? (
+                            <p className="text-xs text-foreground/90 leading-snug">
+                              {spoken}
+                            </p>
+                          ) : onScreen ? (
+                            <p className="text-xs text-foreground/90 leading-snug italic border-l-2 border-primary/50 pl-2">
+                              {onScreen}
+                            </p>
+                          ) : (
+                            <p className="text-xs text-muted-foreground">
+                              No spoken or on-screen text
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
 
                 {panelTab === "clips" &&
                   (!recs ? (
-                    <div className="rounded-lg border border-border p-4">
+                    <div className="rounded-lg border border-border p-4 flex flex-col gap-3 items-start">
                       <p className="text-sm text-muted-foreground">
-                        No clip matches yet — hit &ldquo;Match library
-                        clips&rdquo; to compare this video&apos;s shots against
-                        the analyzed clip library.
+                        No B-roll matches yet — match this video&apos;s shots
+                        against the analyzed clip library to get recommended
+                        B-roll, text, and visual treatments per shot.
                       </p>
+                      <button
+                        onClick={handleMatch}
+                        disabled={matching}
+                        className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed text-sm"
+                      >
+                        {matching
+                          ? "Matching recommended B-roll clips…"
+                          : "Match recommended B-roll clips"}
+                      </button>
+                      {matchError && (
+                        <p className="text-xs text-red-500 break-words">
+                          {matchError}
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <div className="rounded-lg border border-border p-3 flex flex-col gap-2">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         <p className="text-xs font-bold text-foreground uppercase tracking-wide">
-                          Library clips for shot #{selectedShot + 1}
+                          Optional B-roll for segment #{selectedShot + 1}
                         </p>
                         <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => patchKeepSource(!selectedKeepSource)}
+                            title={
+                              selectedKeepSource
+                                ? "Using the original footage for this shot — click to allow B-roll again"
+                                : "Keep the original footage for this shot (no B-roll)"
+                            }
+                            className={`px-2 py-0.5 rounded-md border text-[10px] font-semibold transition-colors ${
+                              selectedKeepSource
+                                ? "border-sky-500/60 bg-sky-500/15 text-sky-700 dark:text-sky-400"
+                                : "border-border text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                            }`}
+                          >
+                            {selectedKeepSource ? "✓ No B-Roll" : "No B-Roll"}
+                          </button>
                           {!previewClip && (
                             <button
                               onClick={() => setAllClipsOpen(true)}
@@ -1414,6 +1914,12 @@ export default function VideoViewerPage() {
                       <p className="text-[10px] text-muted-foreground">
                         Select a shot in the timeline below to see its matches.
                       </p>
+                      {selectedKeepSource && (
+                        <p className="text-[10px] text-sky-700 dark:text-sky-400">
+                          Renders from the source video at this shot&apos;s own
+                          time; B-roll clips are ignored.
+                        </p>
+                      )}
                       {analysis?.shots[selectedShot] && (
                         <ShotTextEditor
                           key={selectedShot}
@@ -1440,7 +1946,11 @@ export default function VideoViewerPage() {
                           }
                         />
                       )}
-                      <div className="flex gap-3 items-start">
+                      <div
+                        className={`flex gap-3 items-start ${
+                          selectedKeepSource ? "opacity-50" : ""
+                        }`}
+                      >
                       {previewClip && (
                         <div className="flex flex-col gap-1 shrink-0 w-[220px]">
                           <div className="rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] max-w-[240px]">
@@ -1448,7 +1958,8 @@ export default function VideoViewerPage() {
                               ref={previewVideoRef}
                               key={`${previewClip.filename}-${previewClip.start ?? "full"}`}
                               controls
-                              autoPlay
+                              playsInline
+                              preload="metadata"
                               muted
                               className="w-full h-full object-contain"
                               onLoadedMetadata={(e) => {
@@ -1464,7 +1975,6 @@ export default function VideoViewerPage() {
                                 if (loopShot) {
                                   if (v.currentTime >= previewClip.end) {
                                     v.currentTime = previewClip.start ?? 0;
-                                    v.play().catch(() => {});
                                   }
                                   return;
                                 }
@@ -1488,7 +1998,7 @@ export default function VideoViewerPage() {
                               title={
                                 loopShot
                                   ? "Stop looping the shot"
-                                  : "Loop this shot + clip on repeat"
+                                  : "Loop the playing shot or clip"
                               }
                               className={`p-2 rounded-lg border transition-colors ${
                                 loopShot
@@ -1555,7 +2065,8 @@ export default function VideoViewerPage() {
                       <div className="flex-1 min-w-0">
                       {selectedRecs.length === 0 ? (
                         <p className="text-xs text-muted-foreground">
-                          No good match in the analyzed library for this shot.
+                          No good B-roll match in the analyzed library for this
+                          shot.
                         </p>
                       ) : (
                         <div className="flex flex-col gap-2">
@@ -1697,11 +2208,149 @@ export default function VideoViewerPage() {
                     </div>
                   ))}
 
-                {panelTab === "render" && render && (
+                {panelTab === "storyboards" &&
+                  project?.kind === "master" &&
+                  videoId && (
+                    <StoryboardPanel
+                      videoId={videoId}
+                      filename={filename}
+                      onSeek={seekTo}
+                    />
+                  )}
+
+                {/* Render Details: once a render exists, TikTok drafts +
+                    warnings come first; then the pipeline buttons + render
+                    settings, the analysis summary, and the render output */}
+                {panelTab === "render" && (
+                  <div className="flex flex-col gap-3">
+                    {render && (
+                    <div className="rounded-lg border border-border p-3 flex flex-col gap-2">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <p className="text-xs font-bold text-foreground uppercase tracking-wide">
+                          📱 Send to TikTok drafts
+                        </p>
+                        {tiktokStatus?.connected && (
+                          <p className="text-[10px] text-muted-foreground">
+                            connected
+                            {tiktokStatus.displayName
+                              ? ` as ${tiktokStatus.displayName}`
+                              : ""}{" "}
+                            ·{" "}
+                            <button
+                              onClick={handleTiktokDisconnect}
+                              className="underline hover:text-foreground"
+                            >
+                              disconnect
+                            </button>
+                          </p>
+                        )}
+                      </div>
+
+                      {!tiktokStatus?.connected ? (
+                        <div className="flex flex-col gap-1.5 items-start">
+                          <p className="text-[11px] text-muted-foreground">
+                            Connect your TikTok account to upload this render
+                            straight to your drafts. You log in on TikTok&apos;s
+                            site — this app never sees your password.
+                          </p>
+                          <button
+                            onClick={handleTiktokConnect}
+                            className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold"
+                          >
+                            Connect TikTok
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-1.5 items-start">
+                          <p className="text-[11px] text-muted-foreground">
+                            Drafts can&apos;t carry a caption — copy it here, then
+                            paste it in the TikTok app when you post.
+                          </p>
+                          {captions && captions.captions.length > 0 && (
+                            <button
+                              onClick={() =>
+                                copyText(
+                                  "tiktok-caption",
+                                  [
+                                    captions.captions[0].text,
+                                    captions.hashtags
+                                      .map((h) => `#${h.tag}`)
+                                      .join(" "),
+                                  ]
+                                    .filter(Boolean)
+                                    .join("\n")
+                                )
+                              }
+                              className="px-2 py-1 rounded-md border border-border text-[10px] font-semibold text-foreground hover:bg-muted/40"
+                            >
+                              {copiedKey === "tiktok-caption"
+                                ? "✓ Caption copied"
+                                : "Copy caption + hashtags"}
+                            </button>
+                          )}
+                          <button
+                            onClick={handleTiktokUpload}
+                            disabled={tiktokUploading || rendering}
+                            className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold disabled:opacity-60"
+                          >
+                            {tiktokUploading
+                              ? "Uploading to TikTok…"
+                              : "Send to TikTok drafts"}
+                          </button>
+                        </div>
+                      )}
+
+                      {tiktokResult && (
+                        <p
+                          className={`text-[11px] break-words ${
+                            tiktokResult.ok
+                              ? "text-green-600 dark:text-green-400"
+                              : "text-red-500"
+                          }`}
+                        >
+                          {tiktokResult.ok ? "✓ " : "✗ "}
+                          {tiktokResult.message}
+                        </p>
+                      )}
+                    </div>
+                    )}
+
+                    {render && render.warnings.length > 0 && (
+                      <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-2 flex flex-col gap-0.5">
+                        {render.warnings.map((w, i) => (
+                          <p
+                            key={i}
+                            className="text-[11px] text-yellow-700 dark:text-yellow-400 break-words"
+                          >
+                            ⚠ {w}
+                          </p>
+                        ))}
+                        <p className="text-[10px] text-yellow-700/80 dark:text-yellow-400/80 mt-0.5">
+                          Add a ✎ fix note on a shot (Video Editing tab or the
+                          render output below) to direct how to solve it (e.g.
+                          &ldquo;loop the clip to fill the shot&rdquo;), then
+                          re-render.
+                        </p>
+                      </div>
+                    )}
+
+                    {renderStale && (
+                      <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-2">
+                        <p className="text-[11px] text-yellow-700 dark:text-yellow-400">
+                          Shot times changed after this render — render again to apply them.
+                        </p>
+                      </div>
+                    )}
+
+                    {geminiActions}
+
+                    {analysisCard}
+
+                    {render && (
                   <div className="rounded-lg border border-border p-3 flex flex-col gap-3">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <p className="text-xs font-bold text-foreground uppercase tracking-wide">
-                        Remake · {render.durationSeconds.toFixed(1)}s
+                        Render output · {render.durationSeconds.toFixed(1)}s
                         {render.time_mode === "follow_original"
                           ? " · follows original lighting"
                           : render.time_target
@@ -1727,43 +2376,6 @@ export default function VideoViewerPage() {
                         shot list below update when it finishes.
                       </p>
                     )}
-
-                    {renderError && (
-                      <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-2">
-                        <p className="text-[11px] text-red-500 break-words">
-                          Render failed: {renderError}
-                        </p>
-                      </div>
-                    )}
-
-                    {render.warnings.length > 0 && (
-                      <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-2 flex flex-col gap-0.5">
-                        {render.warnings.map((w, i) => (
-                          <p
-                            key={i}
-                            className="text-[11px] text-yellow-700 dark:text-yellow-400 break-words"
-                          >
-                            ⚠ {w}
-                          </p>
-                        ))}
-                        <p className="text-[10px] text-yellow-700/80 dark:text-yellow-400/80 mt-0.5">
-                          Add a ✎ fix note on a shot below to direct how to
-                          solve it (e.g. &ldquo;loop the clip to fill the
-                          shot&rdquo;), then re-render.
-                        </p>
-                      </div>
-                    )}
-
-                    <div className="rounded-lg border border-border p-2 flex flex-col gap-2">
-                      {audioControls}
-                      <button
-                        onClick={handleRender}
-                        disabled={rendering}
-                        className="self-start px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold disabled:opacity-60"
-                      >
-                        {rendering ? "Rendering…" : "Re-render with this audio"}
-                      </button>
-                    </div>
 
                     <div className="flex gap-3 items-start flex-wrap">
                       <div className="rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] w-[220px] shrink-0">
@@ -1870,68 +2482,9 @@ export default function VideoViewerPage() {
                                   ✔ fix applied: {s.edit_applied}
                                 </p>
                               )}
-                              {noteShot === s.shot_index ? (
-                                <div className="flex flex-col gap-1 mt-0.5">
-                                  <textarea
-                                    autoFocus
-                                    value={noteDraft}
-                                    onChange={(e) =>
-                                      setNoteDraft(e.target.value)
-                                    }
-                                    rows={2}
-                                    maxLength={500}
-                                    placeholder='How should this shot be fixed? e.g. "loop the clip to fill the shot", "use IMG_0072 and start at 3s", "reuse the clip from shot 3". Save empty to clear.'
-                                    className="w-full text-xs rounded-md border border-border bg-transparent p-1.5 outline-none focus:border-primary resize-y"
-                                  />
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <button
-                                      onClick={() =>
-                                        saveNoteAndRender(s.shot_index)
-                                      }
-                                      disabled={noteSaving || rendering}
-                                      className="px-2 py-1 rounded-md bg-primary text-primary-foreground text-[10px] font-semibold disabled:opacity-60"
-                                    >
-                                      {rendering
-                                        ? "Rendering…"
-                                        : noteSaving
-                                          ? "Saving…"
-                                          : "Save & re-render"}
-                                    </button>
-                                    <button
-                                      onClick={() => saveNote(s.shot_index)}
-                                      disabled={noteSaving || rendering}
-                                      className="px-2 py-1 rounded-md border border-border text-[10px] font-semibold text-foreground hover:bg-muted/40 disabled:opacity-60"
-                                    >
-                                      Save only
-                                    </button>
-                                    <button
-                                      onClick={() => setNoteShot(null)}
-                                      className="text-[10px] text-muted-foreground hover:text-foreground"
-                                    >
-                                      Cancel
-                                    </button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    setNoteShot(s.shot_index);
-                                    setNoteDraft(
-                                      editNotes[String(s.shot_index)] || ""
-                                    );
-                                  }}
-                                  className={`self-start text-left text-[10px] mt-0.5 rounded-md px-1.5 py-0.5 border transition-colors ${
-                                    editNotes[String(s.shot_index)]
-                                      ? "border-primary/40 text-primary hover:bg-primary/10"
-                                      : !s.clip || s.skipped.length > 0
-                                        ? "border-yellow-500/50 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-500/10"
-                                        : "border-border text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                                  }`}
-                                >
-                                  ✎{" "}
-                                  {editNotes[String(s.shot_index)] ||
-                                    "Add fix note"}
-                                </button>
+                              {noteEditor(
+                                s.shot_index,
+                                !s.clip || s.skipped.length > 0
                               )}
                             </div>
                           </div>
@@ -1994,133 +2547,72 @@ export default function VideoViewerPage() {
                         </div>
                       )}
                     </div>
-
-                    <div className="rounded-lg border border-border p-3 flex flex-col gap-2">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <p className="text-xs font-bold text-foreground uppercase tracking-wide">
-                          📱 Send to TikTok drafts
-                        </p>
-                        {tiktokStatus?.connected && (
-                          <p className="text-[10px] text-muted-foreground">
-                            connected
-                            {tiktokStatus.displayName
-                              ? ` as ${tiktokStatus.displayName}`
-                              : ""}{" "}
-                            ·{" "}
-                            <button
-                              onClick={handleTiktokDisconnect}
-                              className="underline hover:text-foreground"
-                            >
-                              disconnect
-                            </button>
-                          </p>
-                        )}
-                      </div>
-
-                      {!tiktokStatus?.connected ? (
-                        <div className="flex flex-col gap-1.5 items-start">
-                          <p className="text-[11px] text-muted-foreground">
-                            Connect your TikTok account to upload this render
-                            straight to your drafts. You log in on TikTok&apos;s
-                            site — this app never sees your password.
-                          </p>
-                          <button
-                            onClick={handleTiktokConnect}
-                            className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold"
-                          >
-                            Connect TikTok
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col gap-1.5 items-start">
-                          <p className="text-[11px] text-muted-foreground">
-                            Drafts can&apos;t carry a caption — copy it here, then
-                            paste it in the TikTok app when you post.
-                          </p>
-                          {captions && captions.captions.length > 0 && (
-                            <button
-                              onClick={() =>
-                                copyText(
-                                  "tiktok-caption",
-                                  [
-                                    captions.captions[0].text,
-                                    captions.hashtags
-                                      .map((h) => `#${h.tag}`)
-                                      .join(" "),
-                                  ]
-                                    .filter(Boolean)
-                                    .join("\n")
-                                )
-                              }
-                              className="px-2 py-1 rounded-md border border-border text-[10px] font-semibold text-foreground hover:bg-muted/40"
-                            >
-                              {copiedKey === "tiktok-caption"
-                                ? "✓ Caption copied"
-                                : "Copy caption + hashtags"}
-                            </button>
-                          )}
-                          <button
-                            onClick={handleTiktokUpload}
-                            disabled={tiktokUploading || rendering}
-                            className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold disabled:opacity-60"
-                          >
-                            {tiktokUploading
-                              ? "Uploading to TikTok…"
-                              : "Send to TikTok drafts"}
-                          </button>
-                        </div>
-                      )}
-
-                      {tiktokResult && (
-                        <p
-                          className={`text-[11px] break-words ${
-                            tiktokResult.ok
-                              ? "text-green-600 dark:text-green-400"
-                              : "text-red-500"
-                          }`}
-                        >
-                          {tiktokResult.ok ? "✓ " : "✗ "}
-                          {tiktokResult.message}
-                        </p>
-                      )}
-                    </div>
+                  </div>
+                    )}
                   </div>
                 )}
 
+                {/* Captions: the concept steers the writer; the button is
+                    the hero before a run and a compact action after */}
                 {panelTab === "captions" && (
                   <div className="rounded-lg border border-border p-4 flex flex-col gap-3">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <p className="text-xs font-bold text-foreground uppercase tracking-wide">
-                        Recommended caption + hashtags
-                      </p>
-                      {captions && (
+                    {captions && (
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <p className="text-xs font-bold text-foreground uppercase tracking-wide">
+                          Recommended caption + hashtags
+                        </p>
                         <p className="text-[10px] text-muted-foreground">
                           {captions.model} ·{" "}
                           {new Date(captions.generatedAt).toLocaleString()}
                         </p>
-                      )}
-                    </div>
+                      </div>
+                    )}
 
-                    <div className="flex items-center gap-2 flex-wrap">
+                    <label className="flex flex-col gap-2">
+                      <span className="text-sm font-medium text-muted-foreground">
+                        Concept
+                      </span>
+                      <textarea
+                        value={captionConcept}
+                        onChange={(e) => setCaptionConcept(e.target.value)}
+                        disabled={captionsLoading}
+                        rows={captions ? 2 : 3}
+                        maxLength={2000}
+                        placeholder="Describe the video you want, e.g. “a 30-second montage of the duck on different dashboards, ending on the Tesla screen frame”"
+                        className="w-full text-sm rounded-lg border border-input bg-transparent px-3 py-2 outline-none focus:border-primary resize-y disabled:opacity-60"
+                      />
+                    </label>
+
+                    {captions ? (
                       <button
                         onClick={handleGenerateCaptions}
                         disabled={captionsLoading}
-                        className="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed text-sm"
+                        className="self-start px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:bg-secondary/80 transition-colors disabled:opacity-60 disabled:cursor-not-allowed text-base"
                       >
                         {captionsLoading
                           ? "Writing captions + sizing hashtags…"
-                          : captions
-                            ? "Re-generate captions"
-                            : "Generate captions"}
+                          : "Re-generate Captions and Hashtags"}
                       </button>
-                      {!captions && !captionsLoading && (
-                        <p className="text-xs text-muted-foreground">
-                          Gemini drafts captions for the remake and
-                          picks up to 5 hashtags, sized against TikHub view
-                          counts.
-                        </p>
-                      )}
-                    </div>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        <button
+                          onClick={handleGenerateCaptions}
+                          disabled={captionsLoading}
+                          className={actionButtonClass}
+                        >
+                          {captionsLoading
+                            ? "Writing captions + sizing hashtags…"
+                            : "Generate Captions and Hashtags"}
+                        </button>
+                        {!captionsLoading && (
+                          <p className="text-xs text-muted-foreground">
+                            Gemini drafts captions for the remake from the
+                            analysis and your concept, then picks up to 5
+                            hashtags sized against TikHub view counts.
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     {captionsError && (
                       <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3">
@@ -2247,243 +2739,56 @@ export default function VideoViewerPage() {
             thumbnail / time / description tracks connected by timestamps */}
         {analysis && shot && (
           <div className="flex flex-col gap-3">
-            <h2 className="text-sm font-bold text-foreground">
-              Shot breakdown ({analysis.shots.length})
+            <h2 className="text-sm font-bold text-foreground uppercase tracking-wide">
+              Timeline
             </h2>
-            <div className="flex rounded-lg border border-border overflow-hidden">
-              {/* Track labels */}
-              <div className="flex flex-col shrink-0 bg-muted/40 border-r border-border text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                <div className="h-24 flex items-center px-2">Video</div>
-                <div className="h-10 flex items-center px-2 border-y border-border">
-                  Time
-                </div>
-                <div className="h-16 flex items-center px-2 border-b border-border">
-                  On-screen
-                </div>
-                <div className="h-16 flex items-center px-2 border-b border-border">
-                  Spoken
-                </div>
-                <div className="h-20 flex items-center px-2">Notes</div>
-                <div className="h-14 flex items-center px-2 border-t border-border">
-                  Tags
-                </div>
-                {recs && (
-                  <div className="h-20 flex items-center px-2 border-t border-border text-primary">
-                    Remake
-                  </div>
-                )}
-              </div>
-
-              {/* Scrollable tracks */}
-              <div ref={timelineRef} className="relative overflow-x-auto">
-                <div
-                  className="relative"
-                  style={{ width: totalDuration * PX_PER_SEC }}
-                >
-                  {/* Playhead */}
-                  <div
-                    className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none"
-                    style={{ left: playheadTime * PX_PER_SEC }}
-                  />
-                  <div className="flex">
-                  {analysis.shots.map((s) => (
-                    <button
-                      key={s.index}
-                      onClick={() => selectShot(s.index)}
-                      style={{
-                        width: (s.end_time - s.start_time) * PX_PER_SEC,
-                      }}
-                      className={`flex flex-col shrink-0 text-left border-l first:border-l-0 border-border transition-colors ${
-                        s.index === selectedShot
-                          ? "bg-primary/10"
-                          : "hover:bg-muted/40"
-                      }`}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={s.screenshot}
-                        alt={`Shot ${s.index + 1}`}
-                        className="w-full h-24 object-cover bg-muted"
-                        loading="lazy"
-                      />
-                      <div
-                        className={`h-10 w-full px-1 flex flex-col justify-center border-y ${
-                          s.index === selectedShot
-                            ? "border-primary/50 bg-primary/15"
-                            : "border-border bg-muted/30"
-                        }`}
-                      >
-                        <span className="text-[10px] font-mono text-foreground leading-tight truncate">
-                          {s.start_time.toFixed(1)}s
-                        </span>
-                        <span className="text-[9px] font-mono text-muted-foreground leading-tight truncate">
-                          +{(s.end_time - s.start_time).toFixed(1)}s
-                        </span>
-                      </div>
-                      <div className="h-16 w-full px-1 py-1 overflow-hidden border-b border-border">
-                        <p className="text-[9px] leading-tight text-foreground line-clamp-4 break-words italic">
-                          {s.on_screen_text || <span className="text-muted-foreground">—</span>}
-                        </p>
-                      </div>
-                      <div className="h-16 w-full px-1 py-1 overflow-hidden border-b border-border">
-                        <p className="text-[9px] leading-tight text-foreground line-clamp-4 break-words">
-                          {s.spoken_text || <span className="text-muted-foreground">—</span>}
-                        </p>
-                      </div>
-                      <div className="h-20 w-full px-1 py-1 overflow-hidden">
-                        <p className="text-[10px] leading-tight text-foreground line-clamp-5 break-words">
-                          {s.description}
-                        </p>
-                      </div>
-                      <div className="h-14 w-full px-1 py-1 overflow-hidden border-t border-border">
-                        {s.tags?.length ? (
-                          <div className="flex flex-wrap gap-0.5">
-                            {s.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="rounded-full bg-muted px-1.5 py-px text-[8px] leading-tight text-foreground"
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-[9px] text-muted-foreground">—</p>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                  </div>
-
-                  {/* Recommended library clips track (outside the shot
-                      buttons — thumbnails are clickable themselves) */}
-                  {recs && (
-                    <div className="flex border-t border-border">
-                      {analysis.shots.map((s) => {
-                        const allShotRecs = recsByShot.get(s.index) || [];
-                        // Float the confirmed pick to the front so its green
-                        // ring is visible (manual picks append past the cap)
-                        const sel = selectedByShot.get(s.index);
-                        const shotRecs = sel
-                          ? [
-                              ...allShotRecs.filter((r) => r.filename === sel),
-                              ...allShotRecs.filter((r) => r.filename !== sel),
-                            ]
-                          : allShotRecs;
-                        return (
-                          <div
-                            key={s.index}
-                            style={{
-                              width: (s.end_time - s.start_time) * PX_PER_SEC,
-                            }}
-                            className={`h-20 shrink-0 border-l first:border-l-0 border-border px-1 py-1 flex items-center gap-1 overflow-hidden ${
-                              s.index === selectedShot ? "bg-primary/10" : ""
-                            }`}
-                          >
-                            {gapForShot(s.index) && (
-                              <button
-                                onClick={() => {
-                                  selectShot(s.index, false);
-                                  setPanelTab("clips");
-                                }}
-                                title="No library clip covers this shot — generate an AI clip"
-                                className="shrink-0 px-1 py-0.5 rounded-md border border-yellow-500/60 bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 text-[9px] font-semibold hover:bg-yellow-500/20 transition-colors"
-                              >
-                                ⚡ generate
-                              </button>
-                            )}
-                            {shotRecs.length === 0 ? (
-                              !gapForShot(s.index) && (
-                                <span className="text-[10px] text-muted-foreground">
-                                  —
-                                </span>
-                              )
-                            ) : (
-                              <>
-                                {shotRecs.slice(0, 2).map((r) => (
-                                  <button
-                                    key={r.filename}
-                                    onClick={() => {
-                                      selectShot(s.index, false);
-                                      setPanelTab("clips");
-                                      setPreviewClip({
-                                        filename: r.filename,
-                                        start: r.trim_start ?? null,
-                                        end: r.trim_end ?? null,
-                                      });
-                                    }}
-                                    title={`${r.filename} (${r.confidence}) — ${r.reason}${
-                                      r.trim_start != null && r.trim_end != null
-                                        ? ` — use ${r.trim_start.toFixed(1)}s → ${r.trim_end.toFixed(1)}s`
-                                        : ""
-                                    }`}
-                                    className={`relative shrink-0 rounded overflow-hidden border transition-colors ${
-                                      selectedByShot.get(s.index) === r.filename
-                                        ? "border-green-500 ring-2 ring-green-500/60"
-                                        : "border-border hover:border-primary"
-                                    }`}
-                                  >
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                                    <img
-                                      src={thumbSrc(r.filename)}
-                                      alt={r.filename}
-                                      className="h-16 w-12 object-cover bg-muted"
-                                      loading="lazy"
-                                    />
-                                    <span
-                                      className={`absolute bottom-0 left-0 right-0 text-[8px] text-center font-semibold ${CONFIDENCE_STYLES[r.confidence]} backdrop-blur-sm`}
-                                    >
-                                      {r.confidence}
-                                    </span>
-                                  </button>
-                                ))}
-                                {shotRecs.length > 2 && (
-                                  <span className="text-[10px] text-muted-foreground shrink-0">
-                                    +{shotRecs.length - 2}
-                                  </span>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Selected shot details */}
-            <div className="rounded-lg border border-border p-3 flex flex-col gap-1">
-              <p className="text-xs font-mono text-muted-foreground">
-                #{shot.index + 1} · {shot.start_time.toFixed(1)}s →{" "}
-                {shot.end_time.toFixed(1)}s ·{" "}
-                {shot.camera_style.replaceAll("_", " ")}
+            <ShotTimeline
+              shots={analysis.shots.map((s) => ({ ...s, screenshot: shotThumb(s) }))}
+              selectedShot={selectedShot}
+              playheadTime={playheadTime}
+              timelineRef={timelineRef}
+              pxPerSec={PX_PER_SEC}
+              sectionFor={(i) => {
+                const section = sectionForShot(i);
+                return section ? SECTION_BADGES[section] : null;
+              }}
+              onSelectShot={selectShot}
+              confidenceStyles={CONFIDENCE_STYLES}
+              recs={
+                recs
+                  ? {
+                      byShot: recsByShot,
+                      selectedByShot,
+                      keepSourceByShot,
+                      gapForShot,
+                      thumbSrc,
+                      sourceBadgeClass: CLIP_SOURCE_BADGES.source.className,
+                      onGenerate: (i) => {
+                        selectShot(i, false);
+                        setPanelTab("clips");
+                      },
+                      onPreview: (i, r) => {
+                        selectShot(i, false);
+                        setPanelTab("clips");
+                        setPreviewClip({
+                          filename: r.filename,
+                          start: r.trim_start ?? null,
+                          end: r.trim_end ?? null,
+                        });
+                      },
+                    }
+                  : null
+              }
+              resize={timelineResize}
+            />
+            {timelineResize && (
+              <p className="text-[10px] text-muted-foreground">
+                {timelineResize.mode === "source"
+                  ? "Drag a line between shots to change where that shot ends in the footage (Alt-drag: where the next one starts). The target length is a goal — cuts snap to words and flag mid-sentence."
+                  : "Drag a line between shots to move the cut. The video's length doesn't change."}
+                {retiming ? " · saving…" : ""}
               </p>
-              <p className="text-sm text-foreground">{shot.description}</p>
-              {shot.on_screen_text && (
-                <p className="text-xs text-foreground/90 border-l-2 border-primary/50 pl-2 italic">
-                  {shot.on_screen_text}
-                </p>
-              )}
-              {shot.spoken_text && (
-                <p className="text-xs text-muted-foreground">
-                  🗣 {shot.spoken_text}
-                </p>
-              )}
-              {shot.tags && shot.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {shot.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground text-[10px]"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
+            )}
 
             {analysis.full_transcript && (
               <div className="rounded-lg border border-border">
@@ -2514,5 +2819,20 @@ export default function VideoViewerPage() {
         onSelect={selectFromLibrary}
       />
     </div>
+  );
+}
+
+// useSearchParams needs a Suspense boundary for static rendering
+export default function VideoViewerPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center min-h-screen">
+          <div className="size-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+        </div>
+      }
+    >
+      <VideoViewerContent />
+    </Suspense>
   );
 }

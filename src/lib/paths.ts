@@ -7,6 +7,9 @@ export { DATA_ROOT };
 // Every on-disk location the app uses, in one place. All of these are
 // gitignored (or live outside the repo when DATA_DIR is set).
 export const DOWNLOADS_DIR = join(DATA_ROOT, "downloads");
+export const STORYBOARDS_DIR = join(DATA_ROOT, "storyboards");
+export const EDITING_DIR = join(DATA_ROOT, "editing");
+export const PROJECT_MEDIA_DIRS = [DOWNLOADS_DIR, STORYBOARDS_DIR, EDITING_DIR] as const;
 export const ANALYSIS_DIR = join(DATA_ROOT, "analysis");
 export const RENDERS_DIR = join(DATA_ROOT, "renders");
 export const GENERATED_DIR = join(DATA_ROOT, "generated");
@@ -24,6 +27,8 @@ export const TIKTOK_TOKEN_PATH = join(DATA_ROOT, "tiktok-token.json");
 
 export const DATA_DIRS = [
   DOWNLOADS_DIR,
+  STORYBOARDS_DIR,
+  EDITING_DIR,
   ANALYSIS_DIR,
   RENDERS_DIR,
   GENERATED_DIR,

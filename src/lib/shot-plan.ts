@@ -13,7 +13,7 @@ import {
 import { validateShots } from "./shot-timing";
 import { loadLibrary } from "./library-store";
 import { getBrandConfig } from "./config";
-import type { ProjectMeta } from "./project-meta";
+import type { BriefProjectMeta } from "./project-meta";
 import { musicPath } from "./music-library";
 
 // Shot planning for projects that start from a brief (a song and/or a
@@ -22,7 +22,8 @@ import { musicPath } from "./music-library";
 // plan is fillable), and — for music projects — the actual audio the video
 // will use, so cuts land on the track's beats and phrases.
 
-interface CatalogSummary {
+export interface CatalogSummary {
+  filename: string;
   description: string;
   category: string;
   camera_action: string;
@@ -31,11 +32,12 @@ interface CatalogSummary {
   tags: string[];
 }
 
-async function loadCatalogSummary(): Promise<CatalogSummary[]> {
+export async function loadCatalogSummary(): Promise<CatalogSummary[]> {
   const library = await loadLibrary();
   return library.videos
     .filter((v) => v.analysis)
     .map((v) => ({
+      filename: v.filename,
       description: v.analysis!.description,
       category: v.analysis!.category,
       camera_action: v.analysis!.camera_action,
@@ -75,7 +77,7 @@ async function renderPlanAudio(
 }
 
 function buildPrompt(
-  meta: ProjectMeta,
+  meta: BriefProjectMeta,
   duration: number,
   catalog: CatalogSummary[],
   hasAudio: boolean
@@ -156,7 +158,7 @@ export interface ShotPlanResult {
 
 export async function planShotsFromBrief(
   ai: GoogleGenAI,
-  meta: ProjectMeta,
+  meta: BriefProjectMeta,
   duration: number
 ): Promise<ShotPlanResult> {
   const catalog = await loadCatalogSummary();

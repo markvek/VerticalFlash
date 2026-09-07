@@ -1,0 +1,95 @@
+import { NextRequest, NextResponse } from "next/server";
+import { isValidVideoId } from "@/lib/video-id";
+import { ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
+import { readMasterSegments } from "@/lib/master-analyze";
+import { readStoryboards, recordStoryboardEdit } from "@/lib/storyboard-store";
+import { readProjectMeta } from "@/lib/project-meta";
+import { findDownloadFile } from "@/lib/download-files";
+import { buildCutdown } from "@/lib/cutdown-build";
+
+// Cutting the beats is a re-encode of a short's worth of video
+export const maxDuration = 300;
+
+const inFlight = new Set<string>();
+
+// Accept one storyboard: cut its beats out of the master into a new
+// "cutdown" project and open it in the editor. Repeatable per storyboard.
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ videoId: string }> }
+) {
+  const { videoId } = await params;
+  if (!isValidVideoId(videoId)) {
+    return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
+  }
+
+  let storyboardId: string;
+  try {
+    const body = await request.json();
+    storyboardId = typeof body?.storyboard_id === "string" ? body.storyboard_id : "";
+  } catch {
+    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+  }
+  if (!storyboardId) {
+    return NextResponse.json({ error: "storyboard_id is required" }, { status: 400 });
+  }
+
+  try {
+    await ensureFfmpeg();
+  } catch (error) {
+    return ffmpegErrorResponse(error)!;
+  }
+
+  const file = await findDownloadFile(videoId);
+  if (!file) {
+    return NextResponse.json({ error: "Master not found" }, { status: 404 });
+  }
+  const meta = await readProjectMeta(file.path);
+  if (meta?.kind !== "master") {
+    return NextResponse.json({ error: "Not a master project" }, { status: 400 });
+  }
+  const [segments, storyboards] = await Promise.all([
+    readMasterSegments(videoId),
+    readStoryboards(videoId),
+  ]);
+  if (!segments || !storyboards) {
+    return NextResponse.json(
+      { error: "Generate storyboards first" },
+      { status: 404 }
+    );
+  }
+  const storyboard = storyboards.storyboards.find((s) => s.id === storyboardId);
+  if (!storyboard) {
+    return NextResponse.json({ error: "Unknown storyboard_id" }, { status: 404 });
+  }
+
+  const key = `${videoId}:${storyboardId}`;
+  if (inFlight.has(key)) {
+    return NextResponse.json(
+      { error: "This storyboard is already being cut" },
+      { status: 409 }
+    );
+  }
+  inFlight.add(key);
+  try {
+    const result = await buildCutdown({
+      masterPath: file.path,
+      masterId: videoId,
+      masterFilename: file.filename,
+      masterMeta: meta,
+      segments,
+      storyboard,
+    });
+    // Remember which short came from this storyboard
+    await recordStoryboardEdit(videoId, storyboard, result.filename);
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error("storyboard accept failed:", error);
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Could not cut the short" },
+      { status: 500 }
+    );
+  } finally {
+    inFlight.delete(key);
+  }
+}

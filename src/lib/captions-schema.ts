@@ -103,6 +103,8 @@ export const CaptionsZ = z.object({
   // Whether TikHub sizing ran (false = no API key or every lookup failed;
   // hashtags then keep Gemini's order with null stats)
   tikhubChecked: z.boolean(),
+  // The creator's own direction for the captions, when one was given
+  concept: z.string().nullable().optional(),
   usage: z
     .object({
       promptTokens: z.number().optional(),

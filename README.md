@@ -6,7 +6,7 @@ one user, no database.
 
 ## What it does
 
-The start page offers four ways to begin a video:
+The start page offers five ways to begin a video:
 
 - **Remake from inspiration.** Scan TikTok niches (hashtags, keywords,
   competitor accounts) through TikHub, pick a winning video, download it, and
@@ -21,6 +21,14 @@ The start page offers four ways to begin a video:
   model.
 - **Start from a song.** Pick a track first (from TikTok or your own files),
   then build a video paced to the music.
+- **Storyboard shorts from your own footage.** Upload a talking-head or
+  product recording (or several clips, joined in order) as a "master".
+  WhisperX transcribes it with word-level timing, Gemini reads the
+  transcript into segments with roles and hook scores, and you ask for
+  1-5 storyboards at the lengths you want. Each storyboard is hook → main
+  → end beats cut from the master; accepting one cuts a real short (with
+  the speaker's own audio) that opens in the same editor. See
+  "Storyboard flow" below.
 
 Rendered videos can be uploaded straight to TikTok drafts, and an analytics
 page matches published posts back to local renders.
@@ -37,6 +45,10 @@ page matches published posts back to local renders.
   planning, generation)
 - Optional: a TikTok developer app, for uploading to drafts and pulling your
   own account's stats
+- Optional: [WhisperX](https://github.com/m-bain/whisperX) for word-accurate
+  cut points in the storyboard flow (`uv tool install whisperx` or
+  `pipx install whisperx`; the first run downloads its models). Without it,
+  masters fall back to Gemini's approximate timing.
 
 ## Setup
 
@@ -61,6 +73,63 @@ npm run analyze:library                # analyze every un-analyzed clip
 ```
 
 Songs go in `music/` or get imported from TikTok inside the app.
+
+## Storyboard flow
+
+Start page → **Storyboard shorts from your own footage** (`/storyboard`):
+
+1. Upload clips (browser uploads are capped at 500 MB each; drop bigger
+   files into `library/` and click Refresh) and pick the ones to join, in
+   order. One clip is fine.
+2. Choose the timing engine. **WhisperX** gives word-level timestamps, so
+   cuts land in the breath around a sentence. **Gemini** needs no install
+   but its timestamps drift by up to seconds on long files; they are
+   tightened against ffmpeg silence detection and flagged as approximate.
+3. "Build master and analyze" joins the clips into `storyboards/master-*.mp4`,
+   transcribes, and writes `analysis/<id>.segments.json`: every word's
+   time, the silences, and Gemini's segments with a role (hook, claim, demo,
+   proof, objection, cta, filler) and a hook score.
+4. In **Storyboarding**, set how many ideas, the length (one
+   for all or one per idea), pacing, whether library B-roll may cover main
+   beats, and an optional brief. Generate, preview a storyboard in the
+   video, and choose **Start Edit** for the ones you like. Each edit cuts the beats
+   into `editing/short-*.mp4` with the audio intact and provides a link to the
+   editor, where every beat renders from the short's own footage ("Use
+   original footage" per shot) and the audio option defaults to Original.
+
+**Add Footage** includes previously uploaded local library clips in the current
+story without changing the original master. Saved timed transcript segments
+from earlier storyboard projects return as selectable transcript boxes. When
+only a whole-clip analysis exists, it appears as one segment; the app does not
+invent word timings or run another analysis. Footage without saved analysis
+cannot be included yet. **Upload Footage** explicitly uploads and analyzes new
+clips through the existing analysis service.
+
+Included footage references and cached transcript segments are saved locally
+in `storyboards/<master-id>/footage/manifest.json`; videos stay in `library/`.
+Storyboard cards have fix notes and black placeholders for missing thumbnails.
+Fix notes carry into the editing project. Caption controls remain in Editing,
+not Storyboarding. Local storage does not change the existing cloud analysis
+and storyboard-generation integrations.
+
+The sidebar separates **Storyboarding** source projects from **Editing**
+projects. Each idea is saved in `storyboards/<master-id>/<storyboard-id>.json`.
+Generating more ideas keeps all earlier designs. Changing an idea saves its
+previous revision under `storyboards/<master-id>/revisions/`; accepting it
+creates a separate editing video with a storyboard snapshot in its metadata.
+Deleting an edit keeps its source and storyboards. Sources referenced by
+saved storyboards or edits cannot be deleted through the project list.
+
+Existing projects in `downloads/` remain accessible at their old URLs. Old
+storyboard sidecars are copied into individual files on the next generation
+or edit, and the original sidecar is retained. This preserves existing saved
+ideas; it cannot recover generations overwritten before this change.
+
+Environment (all optional; see `.env.example`): `TRANSCRIBER`,
+`WHISPERX_BIN`, `WHISPERX_MODEL` (default `large-v3-turbo`),
+`WHISPERX_LANGUAGE`, `WHISPERX_DEVICE`. `STORYBOARD_DRY_RUN=1` skips
+Gemini and builds segments and storyboards by rule from the WhisperX
+sentences, for free end-to-end testing.
 
 ## Configuring your brand
 
@@ -88,8 +157,10 @@ All runtime data sits next to the code by default and is gitignored:
 
 | Path | Contents |
 |---|---|
-| `downloads/` | Downloaded TikTok videos and created projects, with `.metadata.json` sidecars |
-| `analysis/` | Per-video Gemini analysis, tags, recommendations, captions, variations |
+| `downloads/` | Downloaded TikTok videos, legacy projects, and the display-name index |
+| `storyboards/` | Master footage, independently saved storyboard ideas, and previous revisions |
+| `editing/` | Accepted shorts and new editing projects, with metadata and storyboard snapshots |
+| `analysis/` | Per-video analysis, tags, edit state, captions, variations, master segments, and legacy storyboard sidecars |
 | `library/` | Your clip library and its `.metadata.json` catalog |
 | `music/` | Imported tracks and cover art |
 | `renders/` | Rendered remakes and their manifests |
@@ -97,6 +168,10 @@ All runtime data sits next to the code by default and is gitignored:
 | `publishes.json`, `tikhub-cache.json`, `tiktok-token.json` | Upload log, analytics cache, TikTok OAuth token |
 
 Set `DATA_DIR` in `.env.local` to keep all of it outside the repo.
+These local files are the authoritative saved projects; no cloud project
+store is required. Gemini analysis still sends footage to Gemini, and
+publishing uploads the selected render. Local storage does not imply
+entirely offline AI processing.
 
 ## Costs
 
@@ -144,6 +219,7 @@ in `.env.local` and the same URL in your TikTok app settings.
 
 ```
 npm run typecheck
+npm run test:projects  # isolated local storage and ffmpeg workflow tests
 npm run lint
 npm run build
 ```

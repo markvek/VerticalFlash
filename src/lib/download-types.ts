@@ -13,21 +13,56 @@ export interface DownloadEntryMeta {
   createdAt: number;
 }
 
-// Creation brief for projects started from /create (absent for TikTok
-// downloads): the flow, the prompt, the target length, and the song
-export interface DownloadEntryProject {
+export interface DownloadEntryMusic {
+  filename: string;
+  title: string;
+  author: string;
+  duration: number | null;
+}
+
+// Creation brief for projects started from /create: the flow, the prompt,
+// the target length, and the song
+export interface DownloadEntryBriefProject {
   kind: "music" | "prompt";
   prompt: string;
   targetDuration: number;
-  music: {
-    filename: string;
-    title: string;
-    author: string;
-    duration: number | null;
-  } | null;
+  music: DownloadEntryMusic | null;
 }
 
+// The long-form source of the storyboard flow (the user's own footage)
+export interface DownloadEntryMasterProject {
+  kind: "master";
+  title: string;
+  sourceClips: Array<{ filename: string; start: number; end: number }>;
+  timingEngine: "whisperx" | "gemini" | null;
+}
+
+// A short accepted from a master's storyboard
+export interface DownloadEntryCutdownProject {
+  kind: "cutdown";
+  masterId: string;
+  masterFilename: string;
+  storyboardId: string;
+  title: string;
+  hookLine: string;
+  targetDuration: number;
+  timingSource: "whisperx" | "gemini";
+  beats: Array<{
+    section: "hook" | "main" | "end";
+    start: number;
+    end: number;
+    show: "source" | "broll";
+  }>;
+}
+
+// Absent for TikTok downloads
+export type DownloadEntryProject =
+  | DownloadEntryBriefProject
+  | DownloadEntryMasterProject
+  | DownloadEntryCutdownProject;
+
 export interface DownloadEntry {
+  stage?: "storyboarding" | "editing";
   name: string;
   size: number;
   modified: number;

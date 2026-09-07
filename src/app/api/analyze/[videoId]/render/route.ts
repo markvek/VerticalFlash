@@ -16,7 +16,10 @@ import {
   textOverlaysPath,
   type TextOverlays,
 } from "@/lib/text-overlays-schema";
-import { ANALYSIS_DIR, DOWNLOADS_DIR } from "@/lib/paths";
+import { ANALYSIS_DIR } from "@/lib/paths";
+import { findDownloadFile } from "@/lib/download-files";
+import { readProjectMeta } from "@/lib/project-meta";
+import { cutdownSourceShots, withSourceRanges } from "@/lib/cutdown-build";
 
 // Encoding ~15 segments plus any on-demand Gemini trim calls takes a while
 export const maxDuration = 300;
@@ -25,17 +28,7 @@ export const maxDuration = 300;
 const inFlight = new Set<string>();
 
 async function findVideoFile(videoId: string): Promise<string | null> {
-  const files = await fs.readdir(DOWNLOADS_DIR).catch(() => [] as string[]);
-  const match = files.find((f) => {
-    const lower = f.toLowerCase();
-    return (
-      lower.endsWith(`_${videoId}.mp4`) ||
-      lower.endsWith(`_${videoId}.mov`) ||
-      lower === `${videoId}.mp4` ||
-      lower === `${videoId}.mov`
-    );
-  });
-  return match ? join(DOWNLOADS_DIR, match) : null;
+  return (await findDownloadFile(videoId))?.path ?? null;
 }
 
 export async function GET(
@@ -144,6 +137,15 @@ export async function POST(
 
     const library = await loadLibrary();
 
+    // A cutdown renders its source shots from the footage ranges (master
+    // or attached clips), so timeline edits need no re-cut of the short
+    const meta = await readProjectMeta(videoPath);
+    let sourceShots: Awaited<ReturnType<typeof cutdownSourceShots>> | null = null;
+    if (meta?.kind === "cutdown") {
+      analysis = withSourceRanges(analysis, meta);
+      sourceShots = await cutdownSourceShots(meta);
+    }
+
     let editNotes: Record<string, string> = {};
     try {
       const raw = await fs.readFile(editNotesPath(videoId), "utf8");
@@ -171,6 +173,7 @@ export async function POST(
       musicFilename,
       burnText,
       textOverlays,
+      sourceShots,
     });
 
     return NextResponse.json(manifest);

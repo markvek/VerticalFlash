@@ -1,329 +1,186 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { BarChart3, ChevronRight, Film, Home, Menu, RotateCcw, Search, Trash2, X } from "lucide-react";
 import { useScanHistory } from "@/app/context/scan-history";
-import { formatCount } from "@/lib/utils";
-import { useRouter } from "next/navigation";
-
-interface DownloadFile {
-  name: string;
-  size: number;
-  modified: number;
-  displayName: string;
-}
+import type { DownloadEntry } from "@/lib/download-types";
+import { projectHref, projectStage } from "@/lib/project-navigation";
 
 export function HistorySidebar() {
   const { scans, currentScanId, deleteScan } = useScanHistory();
-  const router = useRouter();
-  const [downloads, setDownloads] = useState<DownloadFile[]>([]);
-  const [downloadsOpen, setDownloadsOpen] = useState(true);
-  const [loadingDownloads, setLoadingDownloads] = useState(false);
+  const pathname = usePathname();
+  const [files, setFiles] = useState<DownloadEntry[]>([]);
+  const [open, setOpen] = useState({ scans: true, storyboarding: true, editing: true });
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadDownloads();
-    // Re-fetch when another view renames or changes downloads
-    const onChanged = () => loadDownloads();
-    window.addEventListener("downloads-changed", onChanged);
-    return () => window.removeEventListener("downloads-changed", onChanged);
-  }, []);
-
-  const loadDownloads = async () => {
-    setLoadingDownloads(true);
+  const loadProjects = useCallback(async () => {
     try {
       const response = await fetch("/api/downloads");
-      if (response.ok) {
-        const data = await response.json();
-        setDownloads(data.files || []);
-      }
+      if (!response.ok) throw new Error("Could not load local projects");
+      const data = await response.json();
+      setFiles(data.files ?? []);
+      setError(null);
     } catch (error) {
-      console.error("Failed to load downloads:", error);
+      setError(error instanceof Error ? error.message : "Could not load local projects");
     } finally {
-      setLoadingDownloads(false);
+      setLoading(false);
     }
-  };
+  }, []);
 
-  const handleDeleteDownload = async (filename: string) => {
-    if (!confirm(`Delete ${filename}?`)) return;
+  useEffect(() => {
+    loadProjects();
+    window.addEventListener("downloads-changed", loadProjects);
+    window.addEventListener("focus", loadProjects);
+    return () => {
+      window.removeEventListener("downloads-changed", loadProjects);
+      window.removeEventListener("focus", loadProjects);
+    };
+  }, [loadProjects, pathname]);
 
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const removeProject = async (file: DownloadEntry) => {
+    if (!confirm(`Delete "${file.displayName}" and its local project files?`)) return;
+    setDeleting(file.name);
     try {
       const response = await fetch("/api/downloads", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename }),
+        body: JSON.stringify({ filename: file.name }),
       });
-
-      if (response.ok) {
-        await loadDownloads();
-      } else {
-        alert("Failed to delete file");
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not delete project");
+      window.dispatchEvent(new Event("downloads-changed"));
+      if (pathname.endsWith(`/${encodeURIComponent(file.name)}`)) {
+        window.location.assign(projectStage(file) === "storyboarding" ? "/storyboards" : "/editing");
       }
     } catch (error) {
-      alert("Failed to delete file");
+      setError(error instanceof Error ? error.message : "Could not delete project");
+    } finally {
+      setDeleting(null);
     }
   };
 
-  // Build chain from current scan back to root
-  const getCurrentChain = (): string[] => {
-    if (!currentScanId) return [];
-    const chain: string[] = [];
-    let current = scans.find((s) => s.id === currentScanId);
-    while (current) {
-      chain.unshift(current.id);
-      const parentId = current.parentScanId;
-      current = parentId ? scans.find((s) => s.id === parentId) : undefined;
-    }
-    return chain;
-  };
-
-  const currentChain = getCurrentChain();
+  const navClass = "flex min-h-7 items-center gap-2 text-sm font-semibold hover:text-primary";
+  const closeMobile = () => setMobileOpen(false);
+  const chain: string[] = [];
+  let current = scans.find((scan) => scan.id === currentScanId);
+  while (current && !chain.includes(current.id)) {
+    chain.unshift(current.id);
+    const parentId = current.parentScanId;
+    current = scans.find((scan) => scan.id === parentId);
+  }
 
   return (
-    <div className="w-56 border-r border-border bg-card">
-      <div className="space-y-4 p-4">
-        {/* Global entry points */}
-        <div className="space-y-1">
-          <button
-            onClick={() => router.push("/")}
-            className="w-full text-left flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors"
-          >
-            <svg
-              className="size-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M3 12l9-9 9 9M5 10v10a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V10"
-              />
-            </svg>
-            Start
-          </button>
-          <button
-            onClick={() => router.push("/scan")}
-            className="w-full text-left flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors"
-          >
-            <svg
-              className="size-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"
-              />
-            </svg>
-            New scan
-          </button>
-        </div>
-
-        <div className="border-t border-border pt-4">
-          <h2 className="text-sm font-semibold text-foreground">
-            Scan History
-          </h2>
-          {currentChain.length > 0 && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {currentChain.map((id, idx) => (
-                <span key={id}>
-                  {idx > 0 && " → "}
-                  Scan {scans.findIndex((s) => s.id === id) + 1}
-                </span>
-              ))}
-            </p>
-          )}
-        </div>
-
-        {scans.length === 0 && (
-          <p className="text-xs text-muted-foreground">
-            No scans yet. Start scanning to build history.
-          </p>
-        )}
-
-        <div className="space-y-2 max-h-96 overflow-y-auto">
-          {scans.map((scan, idx) => {
-            const isSelected = scan.id === currentScanId;
-            const isInChain = currentChain.includes(scan.id);
-            const seedsPreview = [
-              scan.seeds.hashtags.slice(0, 1).join(", "),
-              scan.seeds.keywords.slice(0, 1).join(", "),
-              scan.seeds.competitors.slice(0, 1).join(", "),
-            ]
-              .filter(Boolean)
-              .join(", ");
-
-            return (
-              <div key={scan.id}>
-                <button
-                  onClick={() => router.push(`/results?scan=${scan.id}`)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
-                    isSelected
-                      ? "bg-primary/10 border-primary/50 border text-foreground font-medium"
-                      : isInChain
-                        ? "bg-muted/50 text-foreground hover:bg-muted"
-                        : "text-muted-foreground hover:text-foreground hover:bg-muted/30"
-                  }`}
-                >
-                  <div className="font-medium">Scan {idx + 1}</div>
-                  <div className="text-xs mt-0.5 line-clamp-1">
-                    {seedsPreview || "No seeds"}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    {new Date(scan.timestamp).toLocaleTimeString()}
-                  </div>
-                </button>
-                {isSelected && (
-                  <button
-                    onClick={() => {
-                      if (
-                        confirm("Delete this scan from history?")
-                      ) {
-                        deleteScan(scan.id);
-                        router.push("/scan");
-                      }
-                    }}
-                    className="w-full text-xs mt-1 px-2 py-1 text-destructive hover:bg-destructive/10 rounded transition-colors"
-                  >
-                    Delete Scan
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Downloads Section */}
-        <div className="border-t border-border pt-4 space-y-2">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setDownloadsOpen(!downloadsOpen)}
-              aria-label="Toggle downloads list"
-              className="text-foreground hover:text-primary transition-colors"
-            >
-              <svg
-                className={`size-4 transition-transform ${downloadsOpen ? "rotate-90" : ""}`}
-                fill="currentColor"
-                viewBox="0 0 20 20"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            </button>
-            <button
-              onClick={() => router.push("/downloads")}
-              className="flex-1 text-left flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors"
-            >
-              Downloads
-              {downloads.length > 0 && (
-                <span className="text-xs ml-auto bg-primary/20 px-2 py-0.5 rounded">
-                  {downloads.length}
-                </span>
-              )}
-            </button>
+    <>
+      <button type="button" onClick={() => setMobileOpen(true)} aria-label="Open navigation" title="Open navigation"
+        className="fixed left-3 top-3 z-40 flex size-10 items-center justify-center rounded-md border border-border bg-card md:hidden">
+        <Menu className="size-5" />
+      </button>
+      {mobileOpen && <button aria-label="Close navigation" onClick={closeMobile} className="fixed inset-0 z-40 bg-black/30 md:hidden" />}
+      <aside aria-label="Main navigation"
+        className={`${mobileOpen ? "fixed inset-y-0 left-0 z-50 block" : "hidden"} w-56 shrink-0 border-r border-border bg-card md:sticky md:top-0 md:block md:h-screen`}>
+        <nav className="h-full space-y-4 overflow-y-auto p-4" onClick={(event) => {
+          if ((event.target as HTMLElement).closest("a")) closeMobile();
+        }}>
+          <button onClick={closeMobile} aria-label="Close navigation" title="Close navigation"
+            className="ml-auto flex size-8 items-center justify-center md:hidden"><X className="size-4" /></button>
+          <div className="space-y-1">
+            <Link href="/" className={navClass}><Home className="size-4 shrink-0" />Start</Link>
+            <Link href="/scan" className={navClass}><Search className="size-4 shrink-0" />New scan</Link>
           </div>
 
-          {downloadsOpen && (
-            <div className="space-y-1 max-h-48 overflow-y-auto">
-              {loadingDownloads ? (
-                <p className="text-xs text-muted-foreground px-2">Loading...</p>
-              ) : downloads.length === 0 ? (
-                <p className="text-xs text-muted-foreground px-2">
-                  No downloads yet
-                </p>
-              ) : (
-                downloads.map((file) => (
-                  <div
-                    key={file.name}
-                    className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs rounded hover:bg-muted/50 group"
-                  >
-                    <button
-                      onClick={() => router.push(`/downloads/${encodeURIComponent(file.name)}`)}
-                      className="flex-1 min-w-0 text-left hover:text-primary transition-colors"
-                    >
-                      <p className="truncate text-foreground">
-                        {file.displayName}
-                      </p>
-                      <p className="truncate text-muted-foreground">
-                        {file.name} · {(file.size / 1024 / 1024).toFixed(1)}MB
-                      </p>
-                    </button>
-                    <button
-                      onClick={() => handleDeleteDownload(file.name)}
-                      className="opacity-0 group-hover:opacity-100 text-destructive hover:text-destructive/80 transition-opacity"
-                      title="Delete"
-                    >
-                      <svg className="size-3" fill="currentColor" viewBox="0 0 20 20">
-                        <path
-                          fillRule="evenodd"
-                          d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                          clipRule="evenodd"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-        </div>
+          <section className="border-t border-border pt-4">
+            <button onClick={() => setOpen((value) => ({ ...value, scans: !value.scans }))}
+              aria-expanded={open.scans} aria-controls="sidebar-scans" className="flex w-full items-center gap-2 text-left text-sm font-semibold">
+              <ChevronRight className={`size-3.5 shrink-0 ${open.scans ? "rotate-90" : ""}`} />Scan History
+            </button>
+            {open.scans && chain.length > 0 && <p className="mt-1 break-words text-xs text-muted-foreground">
+              {chain.map((id) => `Scan ${scans.findIndex((scan) => scan.id === id) + 1}`).join(" > ")}
+            </p>}
+            {open.scans && <div id="sidebar-scans" className="mt-3 max-h-64 space-y-1 overflow-y-auto">
+              {scans.length === 0 && <p className="px-2 text-xs text-muted-foreground">No scans yet</p>}
+              {scans.map((scan, index) => {
+                const selected = scan.id === currentScanId;
+                const seeds = [...scan.seeds.hashtags.slice(0, 1), ...scan.seeds.keywords.slice(0, 1), ...scan.seeds.competitors.slice(0, 1)].join(", ");
+                return <div key={scan.id}>
+                  <Link href={`/results?scan=${scan.id}`} aria-current={selected ? "page" : undefined}
+                    className={`block rounded-md px-3 py-2 text-sm ${selected ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50"}`}>
+                    <div className="font-medium">Scan {index + 1}</div>
+                    <div className="truncate text-xs" title={seeds}>{seeds || "No seeds"}</div>
+                    <div className="mt-0.5 text-xs text-muted-foreground">{new Date(scan.timestamp).toLocaleTimeString()}</div>
+                  </Link>
+                  {selected && <button className="flex items-center gap-1 px-3 py-1 text-xs text-destructive"
+                    onClick={() => { if (confirm("Delete this scan from history?")) deleteScan(scan.id); }}>
+                    <Trash2 className="size-3" />Delete Scan
+                  </button>}
+                </div>;
+              })}
+            </div>}
+          </section>
 
-        {/* Clip library */}
-        <div className="border-t border-border pt-4">
-          <button
-            onClick={() => router.push("/library")}
-            className="w-full text-left flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors"
-          >
-            <svg className="size-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"
-              />
-            </svg>
-            Clip library
-          </button>
-        </div>
+          {(["storyboarding", "editing"] as const).map((stage) => {
+            const title = stage === "storyboarding" ? "Storyboarding" : "Editing";
+            const entries = files.filter((file) => projectStage(file) === stage)
+              .sort((a, b) => (b.lastEditedAt ?? b.modified) - (a.lastEditedAt ?? a.modified));
+            const href = stage === "storyboarding" ? "/storyboards" : "/editing";
+            return <section key={stage} className="space-y-2 border-t border-border pt-4">
+              <div className="flex min-h-5 items-center gap-2">
+                <button onClick={() => setOpen((value) => ({ ...value, [stage]: !value[stage] }))}
+                  aria-expanded={open[stage]} aria-controls={`sidebar-${stage}`} aria-label={`Toggle ${title}`} title={`Toggle ${title}`}
+                  className="flex size-5 shrink-0 items-center justify-center">
+                  <ChevronRight className={`size-3.5 ${open[stage] ? "rotate-90" : ""}`} />
+                </button>
+                <Link href={href} className="flex min-w-0 flex-1 items-center gap-2 text-sm font-semibold">
+                  {title}<span className="ml-auto min-w-5 rounded bg-muted px-1 text-center text-xs leading-5 tabular-nums">{entries.length}</span>
+                </Link>
+              </div>
+              {open[stage] && <div id={`sidebar-${stage}`} className="max-h-48 space-y-1 overflow-y-auto">
+                {loading ? <p className="px-2 text-xs text-muted-foreground">Loading...</p>
+                  : entries.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">No {stage === "storyboarding" ? "storyboards" : "editing projects"} yet</p>
+                  : entries.map((file) => {
+                    const selected = pathname.endsWith(`/${encodeURIComponent(file.name)}`);
+                    return <div key={file.name} className={`group flex min-h-11 items-center gap-1 rounded px-2 py-1.5 ${selected ? "bg-muted" : "hover:bg-muted/50"}`}>
+                      <Link href={projectHref(file)} aria-current={selected ? "page" : undefined} className="min-w-0 flex-1 text-xs" title={file.displayName}>
+                        <div className="truncate">{file.displayName}</div>
+                        <div className="mt-0.5 truncate text-muted-foreground">{stage === "storyboarding" ? "Storyboarding File" : file.name}</div>
+                      </Link>
+                      <button onClick={() => removeProject(file)} disabled={deleting === file.name}
+                        aria-label={`Delete ${file.displayName}`} title="Delete project"
+                        className="flex size-6 shrink-0 items-center justify-center text-muted-foreground hover:text-destructive focus:opacity-100 md:opacity-0 md:group-hover:opacity-100 disabled:opacity-50">
+                        <X className="size-3" />
+                      </button>
+                    </div>;
+                  })}
+              </div>}
+            </section>;
+          })}
 
-        {/* TikTok analytics */}
-        <div className="border-t border-border pt-4">
-          <button
-            onClick={() => router.push("/analytics")}
-            className="w-full text-left flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors"
-          >
-            <svg className="size-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M3 20h18M6 16v-4m4 4V8m4 8v-6m4 6V4"
-              />
-            </svg>
-            TikTok analytics
-          </button>
-          <button
-            onClick={() => router.push("/iterate")}
-            className="w-full text-left flex items-center gap-2 text-sm font-semibold text-foreground hover:text-primary transition-colors mt-3"
-          >
-            <svg className="size-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 4v5h5M20 20v-5h-5M5.6 9A8 8 0 0119 8.3M18.4 15A8 8 0 015 15.7"
-              />
-            </svg>
-            Iterate on a top video
-          </button>
-        </div>
-      </div>
-    </div>
+          {error && <div role="alert" className="space-y-2 text-xs text-destructive">
+            <p className="break-words">{error}</p>
+            <button onClick={loadProjects} className="flex items-center gap-1"><RotateCcw className="size-3" />Retry</button>
+          </div>}
+
+          <div className="border-t border-border pt-4">
+            <Link href="/library" className={navClass}><Film className="size-4 shrink-0" />Clip library</Link>
+          </div>
+          <div className="space-y-2 border-t border-border pt-4">
+            <Link href="/analytics" className={navClass}><BarChart3 className="size-4 shrink-0" />TikTok analytics</Link>
+            <Link href="/iterate" className={navClass}><RotateCcw className="size-4 shrink-0" />Iterate on a top video</Link>
+          </div>
+        </nav>
+      </aside>
+    </>
   );
 }

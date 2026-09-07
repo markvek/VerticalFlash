@@ -3,7 +3,8 @@ import { promises as fs } from "fs";
 import { join } from "path";
 import { extractVideoId, splitVersion } from "@/lib/video-id";
 import { SIDECAR_KINDS } from "@/lib/sidecars";
-import { ANALYSIS_DIR, DOWNLOADS_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
+import { ANALYSIS_DIR, DOWNLOADS_DIR, EDITING_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
+import { listProjectFiles, resolveProjectFile } from "@/lib/download-files";
 
 const NAMES_FILE = join(DOWNLOADS_DIR, ".names.json");
 
@@ -70,7 +71,8 @@ export async function POST(
     return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
   }
 
-  if (!(await exists(join(DOWNLOADS_DIR, srcFile)))) {
+  const source = await resolveProjectFile(srcFile);
+  if (!source) {
     return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
   if (!(await exists(join(RENDERS_DIR, `${srcId}.render.json`)))) {
@@ -89,6 +91,7 @@ export async function POST(
   inFlight.add(srcFile);
 
   try {
+    await fs.mkdir(EDITING_DIR, { recursive: true });
     // Version numbering is per family: strip any -vN so forking a fork
     // (or forking v1 twice) always yields max existing version + 1
     const extMatch = srcFile.match(/\.(?:mp4|mov)$/i);
@@ -103,8 +106,8 @@ export async function POST(
       "i"
     );
     let maxVersion = 1;
-    for (const entry of await fs.readdir(DOWNLOADS_DIR)) {
-      const m = entry.match(familyRegex);
+    for (const entry of await listProjectFiles()) {
+      const m = entry.filename.match(familyRegex);
       if (m) maxVersion = Math.max(maxVersion, m[1] ? parseInt(m[1], 10) : 1);
     }
 
@@ -115,7 +118,7 @@ export async function POST(
       newFile = `${baseStem}-v${nextV}${ext}`;
       newId = `${baseId}-v${nextV}`;
       const clashes = await Promise.all([
-        exists(join(DOWNLOADS_DIR, newFile)),
+        resolveProjectFile(newFile).then(Boolean),
         exists(join(RENDERS_DIR, `${newId}.mp4`)),
         exists(join(ANALYSIS_DIR, `${newId}.json`)),
       ]);
@@ -124,14 +127,14 @@ export async function POST(
     }
 
     // The source mp4 is the one required copy
-    await fs.copyFile(join(DOWNLOADS_DIR, srcFile), join(DOWNLOADS_DIR, newFile));
+    await fs.copyFile(source.path, join(EDITING_DIR, newFile));
 
     try {
       // TikTok metadata sidecar describes the upstream video — copy verbatim
       await fs
         .copyFile(
-          join(DOWNLOADS_DIR, `${srcFile}.metadata.json`),
-          join(DOWNLOADS_DIR, `${newFile}.metadata.json`)
+          `${source.path}.metadata.json`,
+          join(EDITING_DIR, `${newFile}.metadata.json`)
         )
         .catch(() => {});
 
@@ -209,9 +212,9 @@ export async function POST(
     } catch (error) {
       // Roll back so no half-fork lingers in the listing
       await Promise.all([
-        fs.unlink(join(DOWNLOADS_DIR, newFile)).catch(() => {}),
+        fs.unlink(join(EDITING_DIR, newFile)).catch(() => {}),
         fs
-          .unlink(join(DOWNLOADS_DIR, `${newFile}.metadata.json`))
+          .unlink(join(EDITING_DIR, `${newFile}.metadata.json`))
           .catch(() => {}),
         fs.unlink(join(ANALYSIS_DIR, `${newId}.json`)).catch(() => {}),
         fs

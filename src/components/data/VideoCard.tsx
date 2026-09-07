@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
+import { Play, X } from "lucide-react";
 import type { Video } from "@/lib/tikhub";
 import { formatCount } from "@/lib/utils";
 import { Popover } from "@/components/ui/popover";
 import { VideoPreviewOverlay } from "@/components/ui/VideoPreviewOverlay";
-import { useVideoAutoplayPermission } from "@/hooks/useVideoAutoplayPermission";
+import { beginMediaPlayback } from "@/lib/media-playback";
 
 type DownloadStage =
   | "idle"
@@ -26,37 +27,12 @@ export function VideoCard({ video }: { video: Video }) {
   const [stage, setStage] = useState<DownloadStage>("idle");
   const [stageError, setStageError] = useState<string | null>(null);
   const [savedFilename, setSavedFilename] = useState<string | null>(null);
-  const [showPreview, setShowPreview] = useState(false);
-  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasAudioPermission = useVideoAutoplayPermission();
-
-  useEffect(() => {
-    return () => {
-      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    };
-  }, []);
+  const [playbackRequest, setPlaybackRequest] = useState<number | null>(null);
 
   const tiktokUrl =
     video.authorHandle && video.id
       ? `https://www.tiktok.com/@${video.authorHandle}/video/${video.id}`
       : null;
-
-  const handleMouseEnter = () => {
-    if (!video.id) return;
-
-    // Delay before showing so sweeping the cursor across the grid doesn't
-    // fire a preview fetch (and a TikHub API call) per card crossed
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = setTimeout(() => setShowPreview(true), 400);
-  };
-
-  const handleMouseLeave = () => {
-    if (hoverTimerRef.current) {
-      clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-    setShowPreview(false);
-  };
 
   const handleDownload = async () => {
     if (stage !== "idle" && stage !== "done" && stage !== "error") return;
@@ -130,18 +106,25 @@ export function VideoCard({ video }: { video: Video }) {
   const card = (
     <div
       onClick={() => setPopoverOpen(!popoverOpen)}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       className="group flex h-full cursor-pointer flex-col overflow-hidden rounded-lg border border-border bg-card transition-all hover:border-primary/50"
     >
       <div className="relative aspect-[9/16] w-full overflow-hidden bg-muted">
-        {showPreview && video.id && (
+        {playbackRequest != null && video.id && (
           <VideoPreviewOverlay
             videoUrl={`/api/preview-video?videoId=${encodeURIComponent(video.id)}`}
             videoId={video.id}
-            hasAudioPermission={hasAudioPermission}
+            playbackRequest={playbackRequest}
           />
         )}
+        {video.id && (playbackRequest == null ? <button
+          type="button" aria-label={`Play video by ${video.authorHandle}`} title="Play video"
+          onClick={(event) => { event.stopPropagation(); setPlaybackRequest(beginMediaPlayback()); }}
+          className="absolute inset-0 z-10 flex items-center justify-center text-white"
+        ><span className="flex size-12 items-center justify-center rounded-full bg-black/60"><Play className="size-6" /></span></button> : <button
+          type="button" aria-label="Close video preview" title="Close video preview"
+          onClick={(event) => { event.stopPropagation(); setPlaybackRequest(null); }}
+          className="absolute right-2 top-2 z-20 flex size-8 items-center justify-center rounded bg-black/70 text-white"
+        ><X className="size-4" /></button>)}
         {video.thumbnail ? (
           <img
             src={video.thumbnail}

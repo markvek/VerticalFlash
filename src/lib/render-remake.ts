@@ -28,7 +28,8 @@ import {
   type RenderManifest,
   type RenderShot,
 } from "./render-schema";
-import { ANALYSIS_DIR, DOWNLOADS_DIR, RENDERS_DIR } from "./paths";
+import { ANALYSIS_DIR, RENDERS_DIR } from "./paths";
+import { requireProjectPath } from "./download-files";
 export { RENDERS_DIR } from "./paths";
 
 const FFMPEG_MAX_BUFFER = 10 * 1024 * 1024;
@@ -136,19 +137,30 @@ function majorityGroup(groups: Array<TimeGroup | null>): TimeGroup | null {
 // are preferred (soft — a mismatched clip still beats a black slug) unless
 // the original video itself shifts time of day across shots, in which case
 // each shot follows the original's lighting.
+//
+// A shot flagged keep_source (storyboard cutdowns, or the editor's "use
+// original footage" toggle) bypasses all of that: it is cut from the
+// project's own source video at its own start/end, never claims a library
+// clip, casts no time-of-day vote, and needs no trim window. A fix note
+// that names a clip still overrides it (the directive wins).
 function planShots(
   analysis: Analysis,
   recs: ShotRecommendations,
+  sourceVideo: string,
   clipDurations: Map<string, number | null>,
   clipTimes: Map<string, string | null>,
   directives: Map<number, EditDirective>,
-  warnings: string[]
+  warnings: string[],
+  sourceShots: RenderInput["sourceShots"] = null
 ): {
   planned: PlannedShot[];
   timeMode: "uniform" | "follow_original" | "none";
   timeTarget: TimeGroup | null;
 } {
   const recsByShot = new Map(recs.shots.map((s) => [s.shot_index, s]));
+  const usesSource = (shotIndex: number): boolean =>
+    recsByShot.get(shotIndex)?.keep_source === true &&
+    !directives.get(shotIndex)?.clip;
 
   const eligibilityReason = (
     filename: string,
@@ -171,6 +183,8 @@ function planShots(
   for (const shot of analysis.shots) {
     // A fix note that names a clip supersedes the saved selection
     if (directives.get(shot.index)?.clip) continue;
+    // Original-footage shots never reserve a library clip
+    if (usesSource(shot.index)) continue;
     const recShot = recsByShot.get(shot.index);
     const selected = recShot?.selected_filename ?? null;
     if (!selected) continue;
@@ -224,6 +238,7 @@ function planShots(
   const candidateVotes: Array<TimeGroup | null> = [];
   for (const shot of analysis.shots) {
     if (reservedFor.has(shot.index)) continue;
+    if (usesSource(shot.index)) continue;
     const duration = shot.end_time - shot.start_time;
     for (const r of recsByShot.get(shot.index)?.recommendations ?? []) {
       if (claimedBy.has(r.filename)) continue;
@@ -253,11 +268,47 @@ function planShots(
       : ("none" as const);
 
   // Pass 2: fill the remaining shots in order
-  const planned = analysis.shots.map((shot, shotPos) => {
+  const planned = analysis.shots.map((shot, shotPos): PlannedShot => {
     const duration = shot.end_time - shot.start_time;
     const recShot = recsByShot.get(shot.index);
     let skipped: PlannedShot["skipped"] = [];
     const directive = directives.get(shot.index) ?? null;
+
+    if (usesSource(shot.index)) {
+      // The shot plays its own footage from the source video; the trim
+      // window is the shot itself, so nothing is claimed, padded, or
+      // sent to the trim stage. A fix note without a clip has nothing to
+      // act on here.
+      if (directive) {
+        warnings.push(
+          `Shot ${shot.index + 1}: fix note ignored — the shot uses its original footage (name a library clip to override)`
+        );
+      }
+      // A cutdown shot cuts from its footage range; anything else from the
+      // short at its own times
+      const footage = sourceShots?.[shot.index] ?? null;
+      return {
+        shot_index: shot.index,
+        start_time: shot.start_time,
+        end_time: shot.end_time,
+        duration,
+        clip: footage?.filename ?? sourceVideo,
+        clip_source: "source",
+        trim_start: footage ? footage.start : shot.start_time,
+        trim_end: footage ? Math.round((footage.start + duration) * 1000) / 1000 : shot.end_time,
+        moment_note: "original footage",
+        time_of_day: shot.time_of_day ?? null,
+        fill: null,
+        edit_note: null, // attached from the raw notes by the caller
+        edit_applied: null,
+        padded_seconds: 0,
+        skipped: [],
+        on_screen_text: shot.on_screen_text,
+        spoken_text: shot.spoken_text,
+        burned_text: null,
+        rec: null,
+      };
+    }
     const target = directive?.ignore_time_of_day
       ? null
       : followOriginal
@@ -483,9 +534,10 @@ async function fillMissingTrims(
   const clipTargets = new Map<string, TrimTarget[]>();
   for (const p of planned) {
     if (!p.clip || p.trim_start != null) continue;
-    // Generated clips carry explicit trims from the accept step, and the
-    // trim stage only knows how to read the clip library anyway
-    if (isGeneratedClip(p.clip)) continue;
+    // Original-footage shots are cut at their own times (no window to
+    // pick); generated clips carry explicit trims from the accept step, and
+    // the trim stage only knows how to read the clip library anyway
+    if (p.clip_source === "source" || isGeneratedClip(p.clip)) continue;
     const shot = shotByIndex.get(p.shot_index);
     if (!shot) continue;
     const targets = clipTargets.get(p.clip) || [];
@@ -738,6 +790,83 @@ async function encodeSlugSegment(
   );
 }
 
+// One WAV per shot from its footage range (silence when the footage has no
+// audio or is missing), joined in shot order. Same seek + length as the
+// video segments, so the speaker stays in sync under every shot.
+async function assembleShotAudio(
+  planned: PlannedShot[],
+  sourceShots: NonNullable<RenderInput["sourceShots"]>,
+  workDir: string,
+  warnings: string[]
+): Promise<string> {
+  const parts: string[] = [];
+  const audible = new Map<string, boolean>();
+  for (const p of planned) {
+    const src = sourceShots[p.shot_index] ?? null;
+    const part = join(workDir, `aud_${String(p.shot_index).padStart(2, "0")}.wav`);
+    if (src && !audible.has(src.path)) audible.set(src.path, await hasAudioStream(src.path));
+    if (src && audible.get(src.path)) {
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-ss",
+          src.start.toFixed(3),
+          "-t",
+          p.duration.toFixed(3),
+          "-i",
+          src.path,
+          "-vn",
+          "-ar",
+          "48000",
+          "-ac",
+          "2",
+          "-c:a",
+          "pcm_s16le",
+          part,
+        ],
+        { maxBuffer: FFMPEG_MAX_BUFFER }
+      );
+    } else {
+      if (!src) {
+        warnings.push(`Shot ${p.shot_index + 1}: footage not found — its audio is silent`);
+      }
+      await execFileAsync(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-loglevel",
+          "error",
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          "anullsrc=channel_layout=stereo:sample_rate=48000",
+          "-t",
+          p.duration.toFixed(3),
+          "-c:a",
+          "pcm_s16le",
+          part,
+        ],
+        { maxBuffer: FFMPEG_MAX_BUFFER }
+      );
+    }
+    parts.push(part);
+  }
+  const list = join(workDir, "audio-concat.txt");
+  await fs.writeFile(list, parts.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join("\n"));
+  const out = join(workDir, "shots-audio.wav");
+  await execFileAsync(
+    "ffmpeg",
+    ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", out],
+    { maxBuffer: FFMPEG_MAX_BUFFER }
+  );
+  return out;
+}
+
 export interface RenderInput {
   videoId: string;
   analysis: Analysis;
@@ -760,6 +889,12 @@ export interface RenderInput {
   // Saved text edits/toggles + burn style; shots without an entry fall
   // back to the analysis's detected on_screen_text
   textOverlays?: TextOverlays | null;
+  // Storyboard cutdowns: per shot index, the footage file and file-local
+  // range the shot lives in (the master, or an attached clip). Source shots
+  // cut from here instead of the short mp4, and "original" audio is
+  // assembled per shot from the same ranges, so a shot's length is just
+  // its numbers. null entries fall back to the short.
+  sourceShots?: Array<{ path: string; filename: string; start: number; end: number } | null> | null;
 }
 
 export async function renderRemake(
@@ -776,6 +911,7 @@ export async function renderRemake(
     musicFilename = null,
     burnText = false,
     textOverlays = null,
+    sourceShots = null,
   } = input;
   const audioMode: "music" | "original" | "none" =
     input.audio ?? (includeOriginalAudio ? "original" : "none");
@@ -809,12 +945,6 @@ export async function renderRemake(
     }
   }
 
-  if (recs.clipsConsidered < libraryClipCount) {
-    warnings.push(
-      `Matches were generated against ${recs.clipsConsidered} clips; the library now has ${libraryClipCount} analyzed — consider re-matching`
-    );
-  }
-
   // Exact durations for every candidate clip (the library metadata rounds
   // to 0.1s, and a clip may have changed on disk since matching)
   const candidateFiles = new Set<string>();
@@ -837,13 +967,25 @@ export async function renderRemake(
   const { planned, timeMode, timeTarget } = planShots(
     analysis,
     recs,
+    sourceVideo,
     clipDurations,
     clipTimes,
     directives,
-    warnings
+    warnings,
+    sourceShots
   );
   for (const p of planned) {
     p.edit_note = editNotes[String(p.shot_index)] ?? null;
+  }
+  // Staleness only matters for shots that draw on the library (a cutdown
+  // made entirely of original footage never matched against it)
+  if (
+    recs.clipsConsidered < libraryClipCount &&
+    planned.some((p) => p.clip_source !== "source")
+  ) {
+    warnings.push(
+      `Matches were generated against ${recs.clipsConsidered} clips; the library now has ${libraryClipCount} analyzed — consider re-matching`
+    );
   }
   await fillMissingTrims(
     videoId,
@@ -860,12 +1002,55 @@ export async function renderRemake(
   await fs.mkdir(workDir, { recursive: true });
 
   try {
+    // ffmpeg failure on a shot degrades it to a black slug (never a failed
+    // render); the manifest records what was attempted
+    const slugAfterFailure = async (
+      p: PlannedShot,
+      error: unknown,
+      segPath: string
+    ) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`segment encode failed for ${p.clip}:`, error);
+      warnings.push(
+        `Shot ${p.shot_index + 1}: ffmpeg failed on ${p.clip} — rendered as a black slug`
+      );
+      p.skipped.push({
+        filename: p.clip ?? "",
+        reason: `ffmpeg failed: ${message.slice(0, 200)}`,
+      });
+      p.clip = null;
+      p.clip_source = "none";
+      p.trim_start = null;
+      p.trim_end = null;
+      p.moment_note = null;
+      p.time_of_day = null;
+      p.fill = null;
+      p.edit_applied = null;
+      p.padded_seconds = 0;
+      await encodeSlugSegment(p.duration, segPath);
+    };
+
     const segPaths: string[] = [];
     for (let i = 0; i < planned.length; i++) {
       const p = planned[i];
       const segPath = join(workDir, `seg_${String(i).padStart(2, "0")}.mp4`);
 
-      if (p.clip) {
+      if (p.clip_source === "source") {
+        // Cut the shot straight out of its footage at its own times — the
+        // cutdown's master/attached clip when known, else the short itself;
+        // never a library clip, so it skips resolveClipPath
+        try {
+          await encodeClipSegment(
+            sourceShots?.[p.shot_index]?.path ?? (await requireProjectPath(sourceVideo)),
+            p.trim_start ?? p.start_time,
+            p.duration,
+            0,
+            segPath
+          );
+        } catch (error) {
+          await slugAfterFailure(p, error, segPath);
+        }
+      } else if (p.clip) {
         const clipDuration = clipDurations.get(p.clip);
         // Clamp the window so it fits the exact probed duration, then cover
         // whatever remains: normally a ≤MAX_PAD_SECONDS freeze (eligibility
@@ -921,26 +1106,7 @@ export async function renderRemake(
             );
           }
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          console.error(`segment encode failed for ${p.clip}:`, error);
-          warnings.push(
-            `Shot ${p.shot_index + 1}: ffmpeg failed on ${p.clip} — rendered as a black slug`
-          );
-          p.skipped.push({
-            filename: p.clip,
-            reason: `ffmpeg failed: ${message.slice(0, 200)}`,
-          });
-          p.clip = null;
-          p.clip_source = "none";
-          p.trim_start = null;
-          p.trim_end = null;
-          p.moment_note = null;
-          p.time_of_day = null;
-          p.fill = null;
-          p.edit_applied = null;
-          p.padded_seconds = 0;
-          await encodeSlugSegment(p.duration, segPath);
+          await slugAfterFailure(p, error, segPath);
         }
       } else {
         await encodeSlugSegment(p.duration, segPath);
@@ -1211,11 +1377,56 @@ export async function renderRemake(
       }
     }
 
+    // Cutdown: the speaker's audio is assembled shot by shot from the
+    // footage ranges (the short mp4 may no longer match after timeline
+    // edits), then laid under the cut — B-roll shots included
+    if (audio === "none" && audioMode !== "none" && sourceShots) {
+      const muxPath = join(workDir, "out-audio.mp4");
+      try {
+        const audioPath = await assembleShotAudio(planned, sourceShots, workDir, warnings);
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            burnedPath,
+            "-i",
+            audioPath,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            muxPath,
+          ],
+          { maxBuffer: FFMPEG_MAX_BUFFER }
+        );
+        finalPath = muxPath;
+        audio = "original";
+      } catch (error) {
+        console.error("shot audio assembly failed:", error);
+        warnings.push(
+          "Assembling the speaker audio from the footage failed — falling back to the short's own audio track"
+        );
+      }
+    }
+
     // Lay the original download's audio track over the cut. The render
     // mirrors the original shot-for-shot, so the timelines line up;
     // -shortest trims any sub-second rounding drift at the tail.
     if (audio === "none" && audioMode !== "none") {
-      const sourcePath = join(DOWNLOADS_DIR, sourceVideo);
+      const sourcePath = await requireProjectPath(sourceVideo);
       if (!(await hasAudioStream(sourcePath))) {
         warnings.push(
           "Original audio requested, but the source video has no audio track — rendered silent"

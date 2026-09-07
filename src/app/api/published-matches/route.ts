@@ -11,6 +11,7 @@ import {
 } from "@/lib/match-published";
 import { isValidVideoId } from "@/lib/video-id";
 import { ANALYSIS_DIR, DOWNLOADS_DIR } from "@/lib/paths";
+import { resolveProjectFile } from "@/lib/download-files";
 
 
 const BodyZ = z.object({
@@ -73,7 +74,7 @@ async function loadCandidates(): Promise<RenderCandidate[]> {
       continue;
 
     try {
-      await fs.access(join(DOWNLOADS_DIR, manifest.sourceVideo));
+      if (!(await resolveProjectFile(manifest.sourceVideo))) continue;
     } catch {
       continue;
     }

@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
-import { extractVideoId, splitVersion } from "@/lib/video-id";
+import { extractVideoId, isValidVideoId, splitVersion } from "@/lib/video-id";
 import type {
   DownloadEntry,
   DownloadEntryMeta,
   DownloadEntryProject,
 } from "@/lib/download-types";
-import { ProjectMetaZ } from "@/lib/project-meta";
-import { ANALYSIS_DIR, DOWNLOADS_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
+import { ProjectMetaZ, type ProjectMeta } from "@/lib/project-meta";
+import { SIDECAR_KINDS } from "@/lib/sidecars";
+import { ANALYSIS_DIR, DOWNLOADS_DIR, GENERATED_DIR, RENDERS_DIR, STORYBOARDS_DIR } from "@/lib/paths";
+import { listProjectFiles, resolveProjectFile } from "@/lib/download-files";
+import { readStoryboards, removeStoryboardEdit } from "@/lib/storyboard-store";
 
 // User-given display names: { [filename]: name }
 const NAMES_FILE = join(DOWNLOADS_DIR, ".names.json");
@@ -22,21 +25,51 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
   }
 }
 
-// All edit-state sidecar kinds kept under analysis/<videoId>.<kind>.json
-const SIDECAR_KINDS = [
-  "recommendations",
-  "generation",
-  "edit-notes",
-  "text-overlays",
-  "captions",
-];
+// The listing's view of a created project's metadata sidecar
+function toEntryProject(p: ProjectMeta): DownloadEntryProject {
+  switch (p.kind) {
+    case "music":
+    case "prompt":
+      return {
+        kind: p.kind,
+        prompt: p.prompt,
+        targetDuration: p.targetDuration,
+        music: p.music,
+      };
+    case "master":
+      return {
+        kind: "master",
+        title: p.title,
+        sourceClips: p.sourceClips,
+        timingEngine: p.timingEngine ?? null,
+      };
+    case "cutdown":
+      return {
+        kind: "cutdown",
+        masterId: p.masterId,
+        masterFilename: p.masterFilename,
+        storyboardId: p.storyboardId,
+        title: p.title,
+        hookLine: p.hookLine,
+        targetDuration: p.targetDuration,
+        timingSource: p.timingSource,
+        beats: p.beats.map((b) => ({
+          section: b.section,
+          start: b.start,
+          end: b.end,
+          show: b.show,
+        })),
+      };
+  }
+}
 
 // Analysis, render, and generated-clip state for one download, so the
 // downloads homepage can show status badges without extra round trips.
 // fileModifiedMs is the mp4's own mtime, folded into lastEditedAt.
 async function enrichEntry(
   name: string,
-  fileModifiedMs: number
+  fileModifiedMs: number,
+  directory: string
 ): Promise<{
   videoId: string | null;
   version: number;
@@ -52,7 +85,7 @@ async function enrichEntry(
 
   // Last-edited = max mtime across every file the project writes as you work
   const editedPaths = [
-    join(DOWNLOADS_DIR, `${name}.metadata.json`),
+    join(directory, `${name}.metadata.json`),
     ...(videoId
       ? [
           join(ANALYSIS_DIR, `${videoId}.json`),
@@ -60,6 +93,7 @@ async function enrichEntry(
             join(ANALYSIS_DIR, `${videoId}.${kind}.json`)
           ),
           join(RENDERS_DIR, `${videoId}.render.json`),
+          join(STORYBOARDS_DIR, videoId),
         ]
       : []),
   ];
@@ -73,16 +107,11 @@ async function enrichEntry(
   );
   const lastEditedAt = Math.max(fileModifiedMs, ...mtimes);
 
-  const metaRaw = await readJson(join(DOWNLOADS_DIR, `${name}.metadata.json`));
+  const metaRaw = await readJson(join(directory, `${name}.metadata.json`));
   // Created projects carry a brief instead of TikTok stats
   const projectParsed = metaRaw ? ProjectMetaZ.safeParse(metaRaw) : null;
   const project: DownloadEntryProject | null = projectParsed?.success
-    ? {
-        kind: projectParsed.data.kind,
-        prompt: projectParsed.data.prompt,
-        targetDuration: projectParsed.data.targetDuration,
-        music: projectParsed.data.music,
-      }
+    ? toEntryProject(projectParsed.data)
     : null;
   const meta: DownloadEntryMeta | null = metaRaw && !project
     ? {
@@ -152,11 +181,7 @@ async function enrichEntry(
 
 // Ensure downloads directory exists
 async function ensureDownloadsDir() {
-  try {
-    await fs.mkdir(DOWNLOADS_DIR, { recursive: true });
-  } catch (e) {
-    // Directory already exists or cannot be created
-  }
+  await fs.mkdir(DOWNLOADS_DIR, { recursive: true });
 }
 
 async function loadNames(): Promise<Record<string, string>> {
@@ -176,17 +201,16 @@ export async function GET() {
   try {
     await ensureDownloadsDir();
 
-    const files = (await fs.readdir(DOWNLOADS_DIR)).filter(
-      (name) => !name.endsWith(".metadata.json") && !name.startsWith(".")
-    );
+    const files = await listProjectFiles();
     const fileStats = await Promise.all(
-      files.map(async (filename) => {
+      files.map(async ({ filename, path, directory }) => {
         try {
-          const stat = await fs.stat(join(DOWNLOADS_DIR, filename));
+          const stat = await fs.stat(path);
           return {
             name: filename,
             size: stat.size,
             modified: stat.mtime.getTime(),
+            directory,
           };
         } catch {
           return null;
@@ -207,12 +231,27 @@ export async function GET() {
     const entries: DownloadEntry[] = await Promise.all(
       present.map(async (f) => ({
         ...f,
-        ...(await enrichEntry(f.name, f.modified)),
+        ...(await enrichEntry(f.name, f.modified, f.directory)),
       }))
     );
 
+    const publicEntries = entries.map((entry) => ({
+      name: entry.name,
+      size: entry.size,
+      modified: entry.modified,
+      lastEditedAt: entry.lastEditedAt,
+      displayName: entry.displayName,
+      videoId: entry.videoId,
+      version: entry.version,
+      meta: entry.meta,
+      project: entry.project,
+      analysis: entry.analysis,
+      render: entry.render,
+      generatedClips: entry.generatedClips,
+      stage: entry.project?.kind === "master" ? "storyboarding" : "editing",
+    }));
     return NextResponse.json({
-      files: entries,
+      files: publicEntries,
       total: entries.length,
     });
   } catch (error) {
@@ -247,9 +286,9 @@ export async function PATCH(request: NextRequest) {
     }
 
     await ensureDownloadsDir();
-    await fs.access(join(DOWNLOADS_DIR, filename)).catch(() => {
-      throw new Error("File not found");
-    });
+    if (!(await resolveProjectFile(filename))) {
+      return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
 
     const names = await loadNames();
     const trimmed = displayName.trim();
@@ -291,19 +330,34 @@ export async function DELETE(request: NextRequest) {
     }
 
     await ensureDownloadsDir();
-    const filePath = join(DOWNLOADS_DIR, filename);
-
-    // Verify the file is within the downloads directory
-    const realPath = await fs.realpath(filePath).catch(() => null);
-    const realDownloadDir = await fs.realpath(DOWNLOADS_DIR);
-
-    if (!realPath || !realPath.startsWith(realDownloadDir)) {
+    const file = await resolveProjectFile(filename);
+    if (!file) {
       return NextResponse.json(
-        { error: "Invalid file path" },
-        { status: 400 }
+        { error: "File not found" },
+        { status: 404 }
       );
     }
 
+    const filePath = file.path;
+    const videoId = extractVideoId(filename);
+    if (videoId && isValidVideoId(videoId)) {
+      const storyboards = await readStoryboards(videoId);
+      const dependents = await Promise.all((await listProjectFiles()).map(async (other) => {
+        const meta = await readJson(`${other.path}.metadata.json`);
+        return meta?.masterId === videoId;
+      }));
+      if (storyboards?.storyboards.length || dependents.some(Boolean)) {
+        return NextResponse.json(
+          { error: "This source is used by saved storyboards or editing projects. Keep it to preserve those projects." },
+          { status: 409 }
+        );
+      }
+    }
+
+    const project = ProjectMetaZ.safeParse(await readJson(`${filePath}.metadata.json`));
+    if (project.success && project.data.kind === "cutdown") {
+      await removeStoryboardEdit(project.data.masterId, project.data.storyboardId, filename);
+    }
     await fs.unlink(filePath);
 
     // Remove the metadata sidecar too; absence is fine
@@ -318,7 +372,6 @@ export async function DELETE(request: NextRequest) {
 
     // Remove every per-video artifact: analysis + screenshots, all edit-state
     // sidecars, generated AI clips, and the remake render
-    const videoId = extractVideoId(filename);
     if (videoId) {
       await Promise.all([
         fs.unlink(join(ANALYSIS_DIR, `${videoId}.json`)).catch(() => {}),
@@ -339,7 +392,7 @@ export async function DELETE(request: NextRequest) {
           .unlink(join(RENDERS_DIR, ".thumbs", `${videoId}.jpg`))
           .catch(() => {}),
         fs
-          .unlink(join(DOWNLOADS_DIR, ".thumbs", `${filename}.jpg`))
+          .unlink(join(file.directory, ".thumbs", `${filename}.jpg`))
           .catch(() => {}),
       ]);
     }

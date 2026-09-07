@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { beginMediaPlayback, playMedia } from "@/lib/media-playback";
 import { Button } from "@/components/ui/button";
 import { cn, formatCount, formatRelativeTime } from "@/lib/utils";
 import type { DownloadEntry } from "@/lib/download-types";
@@ -33,6 +34,14 @@ export function DownloadCard({
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(file.displayName);
   const [thumbFailed, setThumbFailed] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const playbackRequest = useRef<number | null>(null);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!playing || !video || playbackRequest.current == null) return;
+    playMedia(video, playbackRequest.current).catch(() => {});
+    return () => video.pause();
+  }, [playing]);
 
   const hasRender = file.render !== null;
   const thumbSrc = `/api/download-thumb/${encodeURIComponent(file.name)}?source=${
@@ -66,15 +75,15 @@ export function DownloadCard({
       <div className="relative h-[480px] aspect-[9/16] shrink-0 rounded-lg overflow-hidden bg-black mx-auto sm:mx-0">
         {playing ? (
           <video
+            ref={videoRef}
             src={videoSrc}
             controls
-            autoPlay
             playsInline
             className="w-full h-full object-contain"
           />
         ) : (
           <button
-            onClick={onPlay}
+            onClick={() => { playbackRequest.current = beginMediaPlayback(); onPlay(); }}
             className="group relative w-full h-full"
             aria-label={`Play ${file.displayName}`}
           >
@@ -115,9 +124,13 @@ export function DownloadCard({
                   ? "Remake"
                   : file.project?.kind === "music"
                     ? "Song"
-                    : file.project
-                      ? "Idea"
-                      : "Original"}
+                    : file.project?.kind === "master"
+                      ? "Master"
+                      : file.project?.kind === "cutdown"
+                        ? "Short"
+                        : file.project
+                          ? "Idea"
+                          : "Original"}
               </span>
               {file.version > 1 && (
                 <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-black/60 text-white">
@@ -200,22 +213,46 @@ export function DownloadCard({
           </div>
         )}
 
-        {file.project && (
-          <div className="text-sm text-muted-foreground space-y-1">
-            <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              {file.project.music && (
-                <span className="text-foreground font-medium">
-                  🎵 {file.project.music.title}
-                  {file.project.music.author
-                    ? ` — ${file.project.music.author}`
-                    : ""}
-                </span>
+        {file.project &&
+          (file.project.kind === "music" || file.project.kind === "prompt") && (
+            <div className="text-sm text-muted-foreground space-y-1">
+              <p className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                {file.project.music && (
+                  <span className="text-foreground font-medium">
+                    🎵 {file.project.music.title}
+                    {file.project.music.author
+                      ? ` — ${file.project.music.author}`
+                      : ""}
+                  </span>
+                )}
+                <span>{file.project.targetDuration}s target</span>
+              </p>
+              {file.project.prompt && (
+                <p className="line-clamp-2">{file.project.prompt}</p>
               )}
-              <span>{file.project.targetDuration}s target</span>
+            </div>
+          )}
+        {file.project?.kind === "master" && (
+          <div className="text-sm text-muted-foreground space-y-1">
+            <p className="text-foreground font-medium line-clamp-1">
+              🎬 {file.project.title}
             </p>
-            {file.project.prompt && (
-              <p className="line-clamp-2">{file.project.prompt}</p>
-            )}
+            <p>
+              {file.project.sourceClips.length} source clip
+              {file.project.sourceClips.length === 1 ? "" : "s"} · storyboard
+              master
+            </p>
+          </div>
+        )}
+        {file.project?.kind === "cutdown" && (
+          <div className="text-sm text-muted-foreground space-y-1">
+            <p className="text-foreground font-medium line-clamp-2">
+              ✂️ {file.project.hookLine || file.project.title}
+            </p>
+            <p>
+              {file.project.beats.length} beats · {file.project.targetDuration}s
+              target · from master
+            </p>
           </div>
         )}
 

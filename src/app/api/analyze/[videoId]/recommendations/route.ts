@@ -385,8 +385,8 @@ export async function GET(
   }
 }
 
-// Save/clear the user's confirmed clip choice and/or remake edit intent for
-// one shot.
+// Save/clear the user's confirmed clip choice, remake edit intent, and/or
+// "use original footage" flag (keep_source) for one shot.
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
@@ -400,6 +400,7 @@ export async function PATCH(
   let filename: string | null = null;
   let hasFilename = false;
   let editIntent: (typeof EDIT_INTENTS)[number] | null | undefined;
+  let keepSource: boolean | null | undefined;
   try {
     const body = await request.json();
     shotIndex = body.shot_index;
@@ -409,6 +410,9 @@ export async function PATCH(
       Object.prototype.hasOwnProperty.call(body, "edit_intent")
         ? body.edit_intent
         : undefined;
+    keepSource = Object.prototype.hasOwnProperty.call(body, "keep_source")
+      ? body.keep_source
+      : undefined;
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
@@ -425,6 +429,16 @@ export async function PATCH(
   ) {
     return NextResponse.json(
       { error: "invalid edit_intent" },
+      { status: 400 }
+    );
+  }
+  if (
+    keepSource !== undefined &&
+    keepSource !== null &&
+    typeof keepSource !== "boolean"
+  ) {
+    return NextResponse.json(
+      { error: "keep_source must be a boolean or null" },
       { status: 400 }
     );
   }
@@ -468,6 +482,9 @@ export async function PATCH(
     }
     if (editIntent !== undefined) {
       shot.edit_intent = editIntent;
+    }
+    if (keepSource !== undefined) {
+      shot.keep_source = keepSource;
     }
     // Manual entries only exist to carry a selection — drop any that are
     // no longer the pick so cleared choices don't linger as cards
@@ -552,6 +569,7 @@ export async function POST(
           {
             selected: s.selected_filename ?? null,
             editIntent: s.edit_intent ?? null,
+            keepSource: s.keep_source ?? null,
           },
         ])
       );
@@ -559,6 +577,11 @@ export async function POST(
         const previousShot = previousByShot.get(shot.shot_index);
         if (previousShot?.editIntent) {
           shot.edit_intent = previousShot.editIntent;
+        }
+        // The "use original footage" flag is the user's call, not the
+        // matcher's — it survives a re-match like a selection does
+        if (previousShot?.keepSource != null) {
+          shot.keep_source = previousShot.keepSource;
         }
         const selected = previousShot?.selected ?? null;
         if (selected && previousShot?.editIntent === "recycle") {

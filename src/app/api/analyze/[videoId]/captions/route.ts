@@ -21,7 +21,8 @@ import {
   TAG_ZONE_MIN,
   TAG_ZONE_MAX,
 } from "@/lib/expand";
-import { ANALYSIS_DIR, DOWNLOADS_DIR } from "@/lib/paths";
+import { ANALYSIS_DIR } from "@/lib/paths";
+import { findDownloadFile } from "@/lib/download-files";
 
 
 // One Gemini text call plus up to ~14 TikHub tag lookups
@@ -57,13 +58,10 @@ async function loadAnalysis(videoId: string): Promise<Analysis | null> {
 
 async function readMetadata(videoId: string): Promise<VideoMetadata> {
   try {
-    const files = await fs.readdir(DOWNLOADS_DIR);
-    const match = files.find(
-      (f) => f.endsWith(`_${videoId}.mp4`) || f === `${videoId}.mp4`
-    );
-    if (!match) return {};
+    const file = await findDownloadFile(videoId);
+    if (!file) return {};
     const raw = await fs.readFile(
-      join(DOWNLOADS_DIR, `${match}.metadata.json`),
+      `${file.path}.metadata.json`,
       "utf8"
     );
     return JSON.parse(raw) as VideoMetadata;
@@ -72,7 +70,14 @@ async function readMetadata(videoId: string): Promise<VideoMetadata> {
   }
 }
 
-function buildPrompt(analysis: Analysis, meta: VideoMetadata): string {
+// The creator's concept is a steer, not a replacement for the analysis
+const MAX_CONCEPT_LENGTH = 2000;
+
+function buildPrompt(
+  analysis: Analysis,
+  meta: VideoMetadata,
+  concept: string | null
+): string {
   const originalTags =
     meta.coTags?.map((t) => `#${t.name}`).join(" ") || "(not available)";
   const onScreenLines = analysis.shots
@@ -96,7 +101,15 @@ THE ORIGINAL VIDEO (a "${analysis.format}" format):
 - Content tags: ${analysis.tags.join(", ")}
 ${onScreenLines ? `- On-screen text in the video:\n${onScreenLines}` : ""}
 - Transcript: ${analysis.full_transcript || "(no speech)"}
-
+${
+  concept
+    ? `
+THE CREATOR'S CONCEPT FOR THE REMAKE (follow this direction — it overrides
+the original's framing where they differ):
+${concept}
+`
+    : ""
+}
 Return JSON matching the schema:
 
 1. captions: 3-4 caption options for the ${brand.name} remake, each with a
@@ -121,12 +134,13 @@ Return JSON matching the schema:
 async function generateCaptions(
   ai: GoogleGenAI,
   analysis: Analysis,
-  meta: VideoMetadata
+  meta: VideoMetadata,
+  concept: string | null
 ): Promise<{
   result: GeminiCaptions;
   usage: Record<string, unknown> | undefined;
 }> {
-  const basePrompt = buildPrompt(analysis, meta);
+  const basePrompt = buildPrompt(analysis, meta, concept);
   let lastError: unknown;
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -313,9 +327,25 @@ export async function POST(
     );
   }
 
+  // Optional { concept } body — the creator's direction for the captions
+  let concept: string | null = null;
+  try {
+    const body = await request.json();
+    if (typeof body?.concept === "string") {
+      concept = body.concept.trim().slice(0, MAX_CONCEPT_LENGTH) || null;
+    }
+  } catch {
+    // No body (or not JSON) — captions come from the analysis alone
+  }
+
   try {
     const meta = await readMetadata(videoId);
-    const { result, usage } = await generateCaptions(ai, analysis, meta);
+    const { result, usage } = await generateCaptions(
+      ai,
+      analysis,
+      meta,
+      concept
+    );
     const { hashtags, tikhubChecked } = await pickHashtags(result, meta);
 
     const stored: Captions = CaptionsZ.parse({
@@ -325,6 +355,7 @@ export async function POST(
       captions: result.captions,
       hashtags,
       tikhubChecked,
+      concept,
       usage: {
         promptTokens: (usage?.promptTokenCount as number) ?? undefined,
         outputTokens: (usage?.candidatesTokenCount as number) ?? undefined,
