@@ -15,7 +15,7 @@ interface TrackCard {
 
 const TRACKS: TrackCard[] = [
   {
-    title: "Remake from inspiration",
+    title: "Get Inspired",
     description:
       "Scan TikTok niches for winning videos, then remake one with your own clips",
     href: "/scan",
@@ -36,9 +36,10 @@ const TRACKS: TrackCard[] = [
     enabled: true,
   },
   {
-    title: "Start from a song",
-    description: "Pick a track first, then build a video paced to the music",
-    href: "/create?flow=music",
+    title: "Storyboard shorts from your own footage",
+    description:
+      "Upload a talking-head or product recording, get hook → main → end storyboards, cut shorts from it",
+    href: "/storyboard",
     enabled: true,
   },
 ];

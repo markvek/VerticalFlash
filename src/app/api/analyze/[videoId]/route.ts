@@ -1,23 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { execFileAsync, ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
 import {
+  AnalysisZ,
   geminiResponseSchema,
   GeminiAnalysisZ,
   type GeminiAnalysis,
   type Analysis,
 } from "@/lib/analysis-schema";
+import {
+  cutdownSourceShots,
+  withSourceRanges,
+} from "@/lib/cutdown-build";
+import { extractShotScreenshot } from "@/lib/analysis-screenshots";
+import { retimeBeats, retimeShots } from "@/lib/shot-retime";
+import { probeDuration } from "@/lib/master-assemble";
 import { validateShots } from "@/lib/validate-shots";
 import { createPartFromUri, createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
-import { readProjectMeta } from "@/lib/project-meta";
+import { isBriefProject, readProjectMeta } from "@/lib/project-meta";
 import { planShotsFromBrief } from "@/lib/shot-plan";
-import { ANALYSIS_DIR, DOWNLOADS_DIR } from "@/lib/paths";
+import { analyzeAndStoreMaster, storyboardDryRun } from "@/lib/master-analyze";
+import { writeCutdownArtifacts } from "@/lib/cutdown-build";
+import { extractScreenshots } from "@/lib/analysis-screenshots";
+import { ANALYSIS_DIR } from "@/lib/paths";
+import { findDownloadFile } from "@/lib/download-files";
 
-// Gemini upload + video analysis can take a while
-export const maxDuration = 300;
+// Gemini upload + video analysis can take a while; a master also runs
+// WhisperX first
+export const maxDuration = 600;
 
 interface VideoMetadata {
   caption?: string;
@@ -27,17 +41,7 @@ interface VideoMetadata {
 }
 
 async function findVideoFile(videoId: string): Promise<string | null> {
-  const files = await fs.readdir(DOWNLOADS_DIR).catch(() => [] as string[]);
-  const match = files.find((f) => {
-    const lower = f.toLowerCase();
-    return (
-      lower.endsWith(`_${videoId}.mp4`) ||
-      lower.endsWith(`_${videoId}.mov`) ||
-      lower === `${videoId}.mp4` ||
-      lower === `${videoId}.mov`
-    );
-  });
-  return match ? join(DOWNLOADS_DIR, match) : null;
+  return (await findDownloadFile(videoId))?.path ?? null;
 }
 
 async function readMetadata(videoPath: string): Promise<VideoMetadata> {
@@ -133,37 +137,6 @@ function parseAnalysis(rawText: string): GeminiAnalysis {
   return GeminiAnalysisZ.parse(parsed);
 }
 
-async function extractScreenshots(
-  videoPath: string,
-  videoId: string,
-  shots: GeminiAnalysis["shots"],
-  duration: number
-): Promise<void> {
-  const shotsDir = join(ANALYSIS_DIR, videoId);
-  // Re-runs replace the whole shots directory
-  await fs.rm(shotsDir, { recursive: true, force: true });
-  await fs.mkdir(shotsDir, { recursive: true });
-
-  for (let i = 0; i < shots.length; i++) {
-    const midpoint = Math.min(
-      (shots[i].start_time + shots[i].end_time) / 2,
-      Math.max(duration - 0.1, 0)
-    );
-    await execFileAsync("ffmpeg", [
-      "-y",
-      "-ss",
-      midpoint.toFixed(3),
-      "-i",
-      videoPath,
-      "-frames:v",
-      "1",
-      "-q:v",
-      "3",
-      join(shotsDir, `shot_${i}.jpg`),
-    ]);
-  }
-}
-
 async function generateAnalysis(
   ai: GoogleGenAI,
   fileUri: string,
@@ -235,18 +208,165 @@ export async function GET(
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
   }
 
+  let analysis: Analysis;
   try {
     const raw = await fs.readFile(
       join(ANALYSIS_DIR, `${videoId}.json`),
       "utf8"
     );
-    return NextResponse.json(JSON.parse(raw));
+    analysis = JSON.parse(raw);
   } catch {
     return NextResponse.json(
       { error: "No analysis found for this video" },
       { status: 404 }
     );
   }
+  // Cutdowns made before source ranges were stored get them from their
+  // beats, so the editor can always show where each shot lives
+  const videoPath = await findVideoFile(videoId);
+  const meta = videoPath ? await readProjectMeta(videoPath) : null;
+  if (meta?.kind === "cutdown") analysis = withSourceRanges(analysis, meta);
+  return NextResponse.json(analysis);
+}
+
+const RetimeBodyZ = z.object({
+  shots: z
+    .array(
+      z.object({
+        index: z.number().int().nonnegative(),
+        start_time: z.number().optional(),
+        end_time: z.number().optional(),
+        source_start: z.number().optional(),
+        source_end: z.number().optional(),
+      })
+    )
+    .min(1),
+});
+
+// Timeline edits: move a split point (any project) or change a shot's
+// footage range (cutdowns — the short mp4 is left alone; the render cuts
+// from the footage at the new range). Only the affected shot frames are
+// regenerated; recommendations, text, and notes stay keyed by index.
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ videoId: string }> }
+) {
+  const { videoId } = await params;
+  if (!/^[\w-]+$/.test(videoId)) {
+    return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
+  }
+  let edits: z.infer<typeof RetimeBodyZ>["shots"];
+  try {
+    edits = RetimeBodyZ.parse(await request.json()).shots;
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof z.ZodError
+            ? error.issues.map((i) => `${i.path.join(".") || "request"}: ${i.message}`).join("; ")
+            : "Invalid request",
+      },
+      { status: 400 }
+    );
+  }
+
+  const videoPath = await findVideoFile(videoId);
+  if (!videoPath) {
+    return NextResponse.json({ error: `No mp4 found for video ${videoId}` }, { status: 404 });
+  }
+  const analysisFile = join(ANALYSIS_DIR, `${videoId}.json`);
+  let analysis: Analysis;
+  try {
+    analysis = AnalysisZ.parse(JSON.parse(await fs.readFile(analysisFile, "utf8")));
+  } catch {
+    return NextResponse.json({ error: "No analysis found for this video" }, { status: 404 });
+  }
+  const meta = await readProjectMeta(videoPath);
+  const now = new Date().toISOString();
+
+  try {
+    if (meta?.kind === "cutdown") {
+      if (edits.some((e) => e.start_time != null || e.end_time != null)) {
+        return NextResponse.json(
+          { error: "A cutdown's shots are re-timed by their footage range (source_start / source_end)" },
+          { status: 400 }
+        );
+      }
+      const footage = await cutdownSourceShots(meta);
+      const beats = retimeBeats(meta.beats, edits, (i) => footage[i]?.bounds ?? { min: 0, max: Infinity });
+      // The metadata file carries fields beyond the parsed meta (caption,
+      // savedAt…): patch the beats in place rather than rewriting from the
+      // parsed object
+      const metaFile = `${videoPath}.metadata.json`;
+      const rawMeta = JSON.parse(await fs.readFile(metaFile, "utf8"));
+      rawMeta.beats = beats;
+      await fs.writeFile(metaFile, JSON.stringify(rawMeta, null, 2));
+
+      analysis = {
+        ...analysis,
+        shotsEditedAt: now,
+        shots: analysis.shots.map((shot, i) => {
+          const beat = beats[i];
+          if (!beat) return shot;
+          return {
+            ...shot,
+            start_time: beat.start,
+            end_time: beat.end,
+            source_start: beat.source_start,
+            source_end: beat.source_end,
+            ...(beat.source ? { source_clip: beat.source.filename } : {}),
+          };
+        }),
+      };
+      for (const edit of edits) {
+        const src = footage[edit.index];
+        const beat = beats[edit.index];
+        if (!src || !beat) continue;
+        const local = (beat.source_start + beat.source_end) / 2 - src.bounds.min;
+        await extractShotScreenshot(src.path, videoId, edit.index, local).catch((error) =>
+          console.error(`shot ${edit.index + 1} frame failed:`, error)
+        );
+      }
+    } else {
+      if (edits.some((e) => e.source_start != null || e.source_end != null)) {
+        return NextResponse.json(
+          { error: "Only storyboard cutdowns have a footage range to change" },
+          { status: 400 }
+        );
+      }
+      const duration = (await probeDuration(videoPath)) ?? analysis.shots[analysis.shots.length - 1]?.end_time ?? 0;
+      const shots = validateShots(retimeShots(analysis.shots, edits), duration);
+      analysis = { ...analysis, shotsEditedAt: now, shots };
+      const changed = new Set<number>();
+      for (const edit of edits) {
+        if (edit.end_time != null) {
+          changed.add(edit.index);
+          changed.add(edit.index + 1);
+        }
+        if (edit.start_time != null) {
+          changed.add(edit.index - 1);
+          changed.add(edit.index);
+        }
+      }
+      for (const i of changed) {
+        const shot = shots[i];
+        if (!shot) continue;
+        await extractShotScreenshot(videoPath, videoId, i, (shot.start_time + shot.end_time) / 2).catch(
+          (error) => console.error(`shot ${i + 1} frame failed:`, error)
+        );
+      }
+    }
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Could not re-time the shots" },
+      { status: 400 }
+    );
+  }
+
+  const tmp = `${analysisFile}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(analysis, null, 2));
+  await fs.rename(tmp, analysisFile);
+  return NextResponse.json(meta?.kind === "cutdown" ? withSourceRanges(analysis, meta) : analysis);
 }
 
 export async function POST(
@@ -273,37 +393,53 @@ export async function POST(
     );
   }
 
-  let ai: GoogleGenAI;
+  const meta = await readMetadata(videoPath);
+  // Projects started from a brief (/create) have a placeholder source —
+  // their shots are planned from the brief and the song, not from footage.
+  // Masters are transcribed and segmented; cutdowns are rebuilt from their
+  // storyboard beats without any model call.
+  const project = await readProjectMeta(videoPath);
+
+  // Gemini is optional for a cutdown rebuild and for a dry-run master
+  let ai: GoogleGenAI | null = null;
   try {
     ai = getGeminiClient();
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Gemini not configured" },
-      { status: 500 }
-    );
+    const optional =
+      project?.kind === "cutdown" ||
+      (project?.kind === "master" && storyboardDryRun());
+    if (!optional) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Gemini not configured" },
+        { status: 500 }
+      );
+    }
   }
-
-  const meta = await readMetadata(videoPath);
-  // Projects started from a brief (/create) have a placeholder source —
-  // their shots are planned from the brief and the song, not from footage
-  const project = await readProjectMeta(videoPath);
 
   let uploadedName: string | undefined;
   try {
     const duration = await getVideoDuration(videoPath);
 
+    if (project?.kind === "cutdown") {
+      const analysis = await writeCutdownArtifacts(videoPath, videoId, project, duration);
+      return NextResponse.json(analysis);
+    }
+
     let analysis: GeminiAnalysis;
     let shots: GeminiAnalysis["shots"];
     let usage: Record<string, unknown> | undefined;
+    if (project?.kind === "master") {
+      return NextResponse.json(await analyzeAndStoreMaster(ai, videoPath, videoId, project, duration));
+    }
     if (project) {
       ({ analysis, shots, usage } = await planShotsFromBrief(
-        ai,
+        ai!,
         project,
         duration
       ));
     } else {
       // Upload via Files API and poll until the file is ACTIVE
-      const uploaded = await ai.files.upload({
+      const uploaded = await ai!.files.upload({
         file: videoPath,
         config: { mimeType: "video/mp4" },
       });
@@ -319,11 +455,11 @@ export async function POST(
           throw new Error("Timed out waiting for Gemini file to become ACTIVE");
         }
         await new Promise((r) => setTimeout(r, 2000));
-        file = await ai.files.get({ name: uploadedName! });
+        file = await ai!.files.get({ name: uploadedName! });
       }
 
       ({ analysis, shots, usage } = await generateAnalysis(
-        ai,
+        ai!,
         file.uri!,
         file.mimeType || "video/mp4",
         meta,
@@ -333,6 +469,7 @@ export async function POST(
 
     await extractScreenshots(videoPath, videoId, shots, duration);
 
+    const brief = project && isBriefProject(project) ? project : null;
     const stored: Analysis = {
       videoId,
       analyzedAt: new Date().toISOString(),
@@ -342,8 +479,8 @@ export async function POST(
       format: analysis.format,
       tags: analysis.tags,
       music: {
-        title: project?.music?.title ?? meta.musicTitle ?? "",
-        author: project?.music?.author ?? meta.musicAuthor ?? "",
+        title: brief?.music?.title ?? meta.musicTitle ?? "",
+        author: brief?.music?.author ?? meta.musicAuthor ?? "",
         usage: analysis.music_usage,
         usage_note: analysis.music_usage_note,
       },
@@ -377,7 +514,7 @@ export async function POST(
     );
   } finally {
     // Never leave uploads behind on Gemini storage
-    if (uploadedName) {
+    if (uploadedName && ai) {
       try {
         await ai.files.delete({ name: uploadedName });
       } catch (cleanupError) {

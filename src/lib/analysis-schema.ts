@@ -171,8 +171,18 @@ export const AnalysisZ = z.object({
       // Optional: analyses saved before per-shot tags existed lack this
       tags: z.array(z.string()).optional(),
       screenshot: z.string(),
+      // Storyboard cutdowns: where this shot's footage lives in the
+      // storyboard's source timeline (the master, or an attached clip named
+      // by source_clip). The render cuts from there, so a length change is
+      // just these numbers — the short mp4 is only a preview.
+      source_start: z.number().optional(),
+      source_end: z.number().optional(),
+      source_clip: z.string().optional(),
     })
   ),
+  // Set when shot times are edited on the timeline; a render older than
+  // this is stale
+  shotsEditedAt: z.string().optional(),
   usage: z
     .object({
       promptTokens: z.number().optional(),

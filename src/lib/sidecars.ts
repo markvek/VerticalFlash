@@ -9,6 +9,10 @@ export const SIDECAR_KINDS = [
   "captions",
   "variations",
   "project",
+  // Storyboard flow (master projects): the timed transcript segments and
+  // the generated storyboards
+  "segments",
+  "storyboards",
 ] as const;
 
 export type SidecarKind = (typeof SIDECAR_KINDS)[number];

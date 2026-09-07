@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MusicLibrary, MusicTrack } from "@/lib/music-schema";
+import { beginMediaPlayback, playMedia } from "@/lib/media-playback";
 
 interface MusicPickerProps {
   // Selected track filename (null = none)
@@ -40,6 +41,14 @@ export function MusicPicker({
   const [addError, setAddError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const playbackRequest = useRef<number | null>(null);
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || playbackRequest.current == null) return;
+    playMedia(audio, playbackRequest.current).catch(() => {});
+    return () => audio.pause();
+  }, [previewing]);
 
   const load = useCallback(async () => {
     try {
@@ -97,6 +106,11 @@ export function MusicPicker({
   };
 
   const togglePreview = (track: MusicTrack) => {
+    if (previewing === track.filename && audioRef.current?.paused) {
+      playMedia(audioRef.current).catch(() => {});
+      return;
+    }
+    playbackRequest.current = beginMediaPlayback();
     setPreviewing((current) => (current === track.filename ? null : track.filename));
   };
 
@@ -146,7 +160,7 @@ export function MusicPicker({
                 <button
                   type="button"
                   onClick={() => togglePreview(track)}
-                  title={previewing === track.filename ? "Stop preview" : "Preview"}
+                  title={previewing === track.filename && previewPlaying ? "Stop preview" : "Preview"}
                   className="relative size-9 shrink-0 rounded overflow-hidden bg-muted flex items-center justify-center text-muted-foreground"
                 >
                   {track.cover ? (
@@ -160,7 +174,7 @@ export function MusicPicker({
                     <span className="text-sm">🎵</span>
                   )}
                   <span className="absolute inset-0 flex items-center justify-center bg-black/40 text-white text-xs">
-                    {previewing === track.filename ? "■" : "▶"}
+                    {previewing === track.filename && previewPlaying ? "■" : "▶"}
                   </span>
                 </button>
                 <button
@@ -199,7 +213,8 @@ export function MusicPicker({
           key={previewing}
           src={`/api/music/${encodeURIComponent(previewing)}`}
           controls
-          autoPlay
+          onPlay={() => setPreviewPlaying(true)}
+          onPause={() => setPreviewPlaying(false)}
           onEnded={() => setPreviewing(null)}
           className="w-full h-8"
         />

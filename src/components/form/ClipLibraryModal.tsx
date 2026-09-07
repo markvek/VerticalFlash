@@ -130,7 +130,6 @@ export function ClipLibraryModal({
                 key={previewVideo.filename}
                 src={`/api/library/clips/${encodeURIComponent(previewVideo.filename)}`}
                 controls
-                autoPlay
                 muted
                 className="w-full h-full object-contain"
               />

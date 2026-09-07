@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
-import { join } from "path";
-import { DOWNLOADS_DIR } from "@/lib/paths";
+import { resolveProjectFile } from "@/lib/download-files";
 
 
 export async function GET(
@@ -20,21 +19,16 @@ export async function GET(
       );
     }
 
-    const filePath = join(DOWNLOADS_DIR, filename);
-
-    // Verify the file is within the downloads directory
-    const realPath = await fs.realpath(filePath).catch(() => null);
-    const realDownloadDir = await fs.realpath(DOWNLOADS_DIR).catch(() => null);
-
-    if (!realPath || !realDownloadDir || !realPath.startsWith(realDownloadDir)) {
+    const file = await resolveProjectFile(filename);
+    if (!file) {
       return NextResponse.json(
-        { error: "Invalid file path" },
-        { status: 400 }
+        { error: "File not found" },
+        { status: 404 }
       );
     }
 
     // Read the file
-    const fileBuffer = await fs.readFile(filePath);
+    const fileBuffer = await fs.readFile(file.path);
 
     // MP4 sanity check: ISO Media files carry "ftyp" at bytes 4-8.
     // Guards against mislabeled files (e.g. an HTML page saved as .mp4)

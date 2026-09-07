@@ -5,16 +5,15 @@ import { join } from "path";
 import { findMusicTrack, musicCoverPath, musicPath } from "@/lib/music-library";
 import { isValidMusicFilename } from "@/lib/music-schema";
 import { PROJECT_KINDS, type ProjectMeta } from "@/lib/project-meta";
-import { DOWNLOADS_DIR } from "@/lib/paths";
+import { DOWNLOADS_DIR, EDITING_DIR } from "@/lib/paths";
 
 const NAMES_FILE = join(DOWNLOADS_DIR, ".names.json");
 
 const MIN_SECONDS = 3;
 const MAX_SECONDS = 180;
 
-// Start a project from a brief. Every project in this app is a file in
-// downloads/ (the listing, editor, analysis, and render all key off it),
-// so a created project gets a placeholder source: the song over its cover
+// Start an editing project from a brief. A created project gets a
+// placeholder source: the song over its cover
 // art (or a dark frame) at the target length, or a silent dark video when
 // there is no song. The metadata sidecar carries the brief; the analyze
 // route plans shots from it instead of watching a video.
@@ -80,7 +79,8 @@ export async function POST(request: NextRequest) {
   // whole stem becomes the videoId
   const videoId = `${kind === "music" ? "song" : "idea"}-${Date.now()}`;
   const filename = `${videoId}.mp4`;
-  const videoPath = join(DOWNLOADS_DIR, filename);
+  const videoPath = join(EDITING_DIR, filename);
+  await fs.mkdir(EDITING_DIR, { recursive: true });
   await fs.mkdir(DOWNLOADS_DIR, { recursive: true });
 
   try {

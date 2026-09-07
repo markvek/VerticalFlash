@@ -21,9 +21,18 @@ export const RenderShotZ = z.object({
   start_time: z.number(),
   end_time: z.number(),
   duration: z.number(),
-  // null = no eligible clip; the slot is a black slug
+  // null = no eligible clip; the slot is a black slug. "source" = the shot
+  // is filled from the project's own source video at the shot's own
+  // start_time/end_time (storyboard cutdowns, or a shot the user flagged
+  // "use original footage") — `clip` is then the downloads/ filename.
   clip: z.string().nullable(),
-  clip_source: z.enum(["selected", "top_recommendation", "generated", "none"]),
+  clip_source: z.enum([
+    "selected",
+    "top_recommendation",
+    "generated",
+    "source",
+    "none",
+  ]),
   trim_start: z.number().nullable(),
   trim_end: z.number().nullable(),
   moment_note: z.string().nullable(),
@@ -105,6 +114,20 @@ export const RenderManifestZ = z.object({
     .optional(),
   warnings: z.array(z.string()),
   shots: z.array(RenderShotZ),
+  // B-roll track segments composited over the cut (absent on renders made
+  // before the track existed)
+  broll: z
+    .array(
+      z.object({
+        id: z.string(),
+        filename: z.string(),
+        start: z.number(),
+        end: z.number(),
+        clip_start: z.number(),
+        phrase: z.string(),
+      })
+    )
+    .optional(),
 });
 
 export type RenderManifest = z.infer<typeof RenderManifestZ>;

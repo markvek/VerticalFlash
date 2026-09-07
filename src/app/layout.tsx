@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ScanHistoryProvider } from "@/app/context/scan-history";
 import { BrandProvider } from "@/app/context/brand";
 import { HistorySidebar } from "@/components/nav/HistorySidebar";
+import { MediaPlaybackGuard } from "@/components/ui/MediaPlaybackGuard";
 import { getPublicBrand } from "@/lib/config";
 import "./globals.css";
 
@@ -32,10 +33,11 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="flex min-h-full">
+        <MediaPlaybackGuard />
         <BrandProvider value={brand}>
           <ScanHistoryProvider>
             <HistorySidebar />
-            <main className="flex-1 min-w-0">{children}</main>
+            <main className="flex-1 min-w-0 pt-16 md:pt-0">{children}</main>
           </ScanHistoryProvider>
         </BrandProvider>
       </body>

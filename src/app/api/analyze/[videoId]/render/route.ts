@@ -16,7 +16,14 @@ import {
   textOverlaysPath,
   type TextOverlays,
 } from "@/lib/text-overlays-schema";
-import { ANALYSIS_DIR, DOWNLOADS_DIR } from "@/lib/paths";
+import { ANALYSIS_DIR } from "@/lib/paths";
+import { findDownloadFile } from "@/lib/download-files";
+import { readProjectMeta } from "@/lib/project-meta";
+import { cutdownSourceShots, withSourceRanges } from "@/lib/cutdown-build";
+import { readBrollTrack } from "@/lib/broll-store";
+import { resolveBrollTrack } from "@/lib/broll-resolve";
+import { readMasterSegments } from "@/lib/master-analyze";
+import type { BrollRenderSegment } from "@/lib/render-remake";
 
 // Encoding ~15 segments plus any on-demand Gemini trim calls takes a while
 export const maxDuration = 300;
@@ -25,17 +32,7 @@ export const maxDuration = 300;
 const inFlight = new Set<string>();
 
 async function findVideoFile(videoId: string): Promise<string | null> {
-  const files = await fs.readdir(DOWNLOADS_DIR).catch(() => [] as string[]);
-  const match = files.find((f) => {
-    const lower = f.toLowerCase();
-    return (
-      lower.endsWith(`_${videoId}.mp4`) ||
-      lower.endsWith(`_${videoId}.mov`) ||
-      lower === `${videoId}.mp4` ||
-      lower === `${videoId}.mov`
-    );
-  });
-  return match ? join(DOWNLOADS_DIR, match) : null;
+  return (await findDownloadFile(videoId))?.path ?? null;
 }
 
 export async function GET(
@@ -144,6 +141,26 @@ export async function POST(
 
     const library = await loadLibrary();
 
+    // A cutdown renders its source shots from the footage ranges (master
+    // or attached clips), so timeline edits need no re-cut of the short
+    const meta = await readProjectMeta(videoPath);
+    let sourceShots: Awaited<ReturnType<typeof cutdownSourceShots>> | null = null;
+    if (meta?.kind === "cutdown") {
+      analysis = withSourceRanges(analysis, meta);
+      sourceShots = await cutdownSourceShots(meta);
+    }
+
+    // The B-roll track: placed segments with a clip, resolved onto the
+    // output timeline (suggested and invalid ones are not rendered)
+    const brollTrack = await readBrollTrack(videoId);
+    const words = meta?.kind === "cutdown" ? ((await readMasterSegments(meta.masterId))?.words ?? null) : null;
+    const brollResolved = new Map(resolveBrollTrack(brollTrack, analysis.shots, words).map((r) => [r.id, r]));
+    const broll: BrollRenderSegment[] = brollTrack.segments.flatMap((s) => {
+      const r = brollResolved.get(s.id);
+      if (s.status !== "placed" || !s.clip || !r?.valid) return [];
+      return [{ id: s.id, filename: s.clip.filename, start: r.start, end: r.end, clip_start: s.clip.clip_start, phrase: s.phrase }];
+    });
+
     let editNotes: Record<string, string> = {};
     try {
       const raw = await fs.readFile(editNotesPath(videoId), "utf8");
@@ -171,6 +188,8 @@ export async function POST(
       musicFilename,
       burnText,
       textOverlays,
+      sourceShots,
+      broll,
     });
 
     return NextResponse.json(manifest);
