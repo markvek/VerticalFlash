@@ -131,6 +131,20 @@ Environment (all optional; see `.env.example`): `TRANSCRIBER`,
 Gemini and builds segments and storyboards by rule from the WhisperX
 sentences, for free end-to-end testing.
 
+## Connecting an agent
+
+Open **Settings** (`/settings`) to download the MCP connector kit, a client
+configuration example, and Markdown guides for creative direction,
+storyboarding, editing, and B-roll. The kit contains a runnable local stdio
+server; see [agent-kit/README.md](agent-kit/README.md) for installation and
+supported tools. It connects to the existing app on the same computer.
+Cloud-only clients need a future authenticated remote adapter.
+
+The connector uses existing project APIs and provider configuration. It does
+not yet add cross-client revision protection or retry-safe jobs for every
+operation. Coordinate browser and agent edits, and inspect project state
+after an interrupted write before repeating it.
+
 ## Configuring your brand
 
 Everything product-specific lives in `brand.config.json`. The example file

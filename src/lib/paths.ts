@@ -4,6 +4,9 @@ import { DATA_ROOT, getBrandConfig } from "./config";
 
 export { DATA_ROOT };
 
+// Shipped connector files belong to the application, independent of DATA_DIR.
+export const AGENT_KIT_DIR = join(process.cwd(), "agent-kit");
+
 // Every on-disk location the app uses, in one place. All of these are
 // gitignored (or live outside the repo when DATA_DIR is set).
 export const DOWNLOADS_DIR = join(DATA_ROOT, "downloads");
@@ -14,6 +17,7 @@ export const ANALYSIS_DIR = join(DATA_ROOT, "analysis");
 export const RENDERS_DIR = join(DATA_ROOT, "renders");
 export const GENERATED_DIR = join(DATA_ROOT, "generated");
 export const MUSIC_DIR = join(DATA_ROOT, "music");
+export const BENCHMARKS_DIR = join(DATA_ROOT, "benchmarks");
 
 // The brand's clip library (folder name comes from brand.config.json)
 export const LIBRARY_DIR = join(DATA_ROOT, getBrandConfig().libraryDir);
@@ -24,6 +28,7 @@ export const LIBRARY_THUMBS_DIR = join(LIBRARY_DIR, ".thumbs");
 export const PUBLISH_STORE_PATH = join(DATA_ROOT, "publishes.json");
 export const TIKHUB_CACHE_PATH = join(DATA_ROOT, "tikhub-cache.json");
 export const TIKTOK_TOKEN_PATH = join(DATA_ROOT, "tiktok-token.json");
+export const AGENT_SETTINGS_PATH = join(DATA_ROOT, "agent-settings.json");
 
 export const DATA_DIRS = [
   DOWNLOADS_DIR,
@@ -33,6 +38,7 @@ export const DATA_DIRS = [
   RENDERS_DIR,
   GENERATED_DIR,
   MUSIC_DIR,
+  BENCHMARKS_DIR,
   LIBRARY_DIR,
 ] as const;
 

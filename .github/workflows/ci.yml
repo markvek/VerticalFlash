@@ -18,6 +18,14 @@ jobs:
 
       - run: npm ci
 
+      - run: npm ci --prefix agent-kit/mcp
+
+      - run: npm run test:agents
+
+      - run: npm run test:benchmarks
+
+      - run: npm test --prefix agent-kit/mcp
+
       - run: npm run typecheck
 
       - run: npm run lint

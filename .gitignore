@@ -27,6 +27,7 @@ tikhub-cache.json
 publishes.json
 published-links.json
 performance-insights.json
+agent-settings.json
 
 # Local dev TLS certificates
 /certificates/
@@ -39,6 +40,7 @@ performance-insights.json
 /library/
 /renders/
 /generated/
+/benchmarks/
 
 # Music library (local only)
 /music/

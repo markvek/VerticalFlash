@@ -17,6 +17,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:projects": "node --import tsx --test scripts/project-storage.test.ts",
+    "test:agents": "node --import tsx --test scripts/agent-kit.test.ts",
+    "test:benchmarks": "node --import tsx --test scripts/benchmark-store.test.ts",
     "lint": "eslint .",
     "analyze:library": "node --env-file-if-exists=.env.local --import tsx scripts/analyze-library-batch.ts"
   },
@@ -25,6 +27,7 @@
     "@napi-rs/canvas": "^1.0.8",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
+    "fflate": "0.8.3",
     "lucide-react": "^1.41.0",
     "next": "^15.0.0",
     "radix-ui": "^1.0.0",
