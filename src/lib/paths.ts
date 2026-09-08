@@ -17,6 +17,7 @@ export const ANALYSIS_DIR = join(DATA_ROOT, "analysis");
 export const RENDERS_DIR = join(DATA_ROOT, "renders");
 export const GENERATED_DIR = join(DATA_ROOT, "generated");
 export const MUSIC_DIR = join(DATA_ROOT, "music");
+export const BENCHMARKS_DIR = join(DATA_ROOT, "benchmarks");
 
 // The brand's clip library (folder name comes from brand.config.json)
 export const LIBRARY_DIR = join(DATA_ROOT, getBrandConfig().libraryDir);
@@ -37,6 +38,7 @@ export const DATA_DIRS = [
   RENDERS_DIR,
   GENERATED_DIR,
   MUSIC_DIR,
+  BENCHMARKS_DIR,
   LIBRARY_DIR,
 ] as const;
 

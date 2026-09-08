@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { ArrowDownToLine, Check, FileText, Monitor, Plug, Settings2 } from "lucide-react";
+import Link from "next/link";
+import { ArrowDownToLine, BarChart3, Check, FileText, Monitor, Plug, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentSettingsBoard } from "@/components/settings/AgentSettingsBoard";
 import { AGENT_GUIDES, AGENT_KIT_VERSION, agentDownloadHref } from "@/lib/agent-kit-catalog";
@@ -16,6 +17,25 @@ export default function SettingsPage() {
       </header>
 
       <AgentSettingsBoard />
+
+      <section aria-labelledby="benchmarks" className="rounded-lg border border-border bg-card p-5 sm:p-7">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <BarChart3 className="size-5" aria-hidden="true" />
+            </div>
+            <div>
+              <h2 id="benchmarks" className="text-lg font-semibold">AI editing benchmarks</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
+                Create locked provider comparisons for tagging, matching, storyboarding, editing, and B-roll, then collect blind human ratings.
+              </p>
+            </div>
+          </div>
+          <Button asChild size="lg">
+            <Link href="/benchmarks">Open benchmarks</Link>
+          </Button>
+        </div>
+      </section>
 
       <section aria-labelledby="agent-connection" className="overflow-hidden rounded-xl border border-border bg-card">
         <div className="space-y-5 p-5 sm:p-7">

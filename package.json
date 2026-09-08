@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit",
     "test:projects": "node --import tsx --test scripts/project-storage.test.ts",
     "test:agents": "node --import tsx --test scripts/agent-kit.test.ts",
+    "test:benchmarks": "node --import tsx --test scripts/benchmark-store.test.ts",
     "lint": "eslint .",
     "analyze:library": "node --env-file-if-exists=.env.local --import tsx scripts/analyze-library-batch.ts"
   },

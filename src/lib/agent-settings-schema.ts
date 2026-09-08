@@ -189,4 +189,13 @@ export const AGENT_OPTIONS: AgentOption[] = [
       "edit_note_interpretation",
     ],
   },
+  {
+    id: "xai:grok",
+    label: "Grok",
+    provider: "xAI",
+    model: "grok",
+    description: "Placeholder for a future Grok adapter and benchmark comparison.",
+    status: "planned",
+    supports: textAndVisionCapabilities,
+  },
 ];

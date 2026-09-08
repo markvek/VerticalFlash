@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, ChevronRight, Film, Home, Menu, RotateCcw, Search, Settings2, Trash2, X } from "lucide-react";
+import { BarChart3, ChevronRight, ClipboardCheck, Film, Home, Menu, RotateCcw, Search, Settings2, Trash2, X } from "lucide-react";
 import { useScanHistory } from "@/app/context/scan-history";
 import type { DownloadEntry } from "@/lib/download-types";
 import { projectHref, projectStage } from "@/lib/project-navigation";
@@ -178,6 +178,7 @@ export function HistorySidebar() {
           <div className="space-y-2 border-t border-border pt-4">
             <Link href="/analytics" className={navClass}><BarChart3 className="size-4 shrink-0" />TikTok analytics</Link>
             <Link href="/iterate" className={navClass}><RotateCcw className="size-4 shrink-0" />Iterate on a top video</Link>
+            <Link href="/benchmarks" className={navClass}><ClipboardCheck className="size-4 shrink-0" />Benchmarks</Link>
           </div>
           <div className="border-t border-border pt-4">
             <Link href="/settings" aria-current={pathname === "/settings" ? "page" : undefined}

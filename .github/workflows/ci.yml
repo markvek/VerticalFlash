@@ -22,6 +22,8 @@ jobs:
 
       - run: npm run test:agents
 
+      - run: npm run test:benchmarks
+
       - run: npm test --prefix agent-kit/mcp
 
       - run: npm run typecheck
