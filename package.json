@@ -20,7 +20,8 @@
     "test:agents": "node --import tsx --test scripts/agent-kit.test.ts",
     "test:benchmarks": "node --import tsx --test scripts/benchmark-store.test.ts",
     "lint": "eslint .",
-    "analyze:library": "node --env-file-if-exists=.env.local --import tsx scripts/analyze-library-batch.ts"
+    "analyze:library": "node --env-file-if-exists=.env.local --import tsx scripts/analyze-library-batch.ts",
+    "test:storyboard-benchmarks": "node --import tsx --test scripts/model-providers.test.ts scripts/storyboard-benchmark.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.17.1",

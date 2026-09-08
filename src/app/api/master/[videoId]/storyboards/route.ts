@@ -1,3 +1,4 @@
+import { nativeModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import type { GoogleGenAI } from "@google/genai";
@@ -97,7 +98,7 @@ export async function POST(
 
   let ai: GoogleGenAI | null = null;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(nativeModel(req.model ?? meta.model));
   } catch (error) {
     if (!storyboardDryRun()) {
       return NextResponse.json(

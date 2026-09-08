@@ -1,5 +1,6 @@
 "use client";
 
+import { StoryboardBenchmarkResults } from "./StoryboardBenchmarkResults";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, ClipboardCheck, Eye, Save } from "lucide-react";
@@ -123,6 +124,8 @@ export function BenchmarkRunBoard({ runId }: BenchmarkRunBoardProps) {
       </div>
     );
   }
+
+  if (run.execution) return <StoryboardBenchmarkResults initial={run} />;
 
   return (
     <div className="mx-auto min-h-screen w-full max-w-6xl space-y-8 px-5 py-8 text-foreground sm:p-10">

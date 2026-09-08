@@ -1,3 +1,4 @@
+import { benchmarkWithInterruption } from "@/lib/storyboard-benchmark";
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -8,7 +9,6 @@ import {
 import {
   addBenchmarkHumanReview,
   assignBenchmarkVariantOutput,
-  readBenchmarkRun,
 } from "@/lib/benchmarks";
 
 export const runtime = "nodejs";
@@ -46,7 +46,7 @@ export async function GET(
   { params }: { params: Promise<{ runId: string }> }
 ) {
   const { runId } = await params;
-  const run = await readBenchmarkRun(runId);
+  const run = await benchmarkWithInterruption(runId);
   if (!run) {
     return NextResponse.json({ error: "Benchmark not found" }, { status: 404 });
   }

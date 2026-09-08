@@ -312,6 +312,7 @@ export const STORYBOARD_MIN_SECONDS = 5;
 export const STORYBOARD_MAX_SECONDS = 180;
 
 export const StoryboardRequestZ = z.object({
+  model: z.string().optional(),
   count: z.number().int().min(STORYBOARD_MIN_COUNT).max(STORYBOARD_MAX_COUNT),
   // One entry = the same length for every idea; otherwise one per idea
   lengths: z

@@ -1,9 +1,10 @@
+import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { execFileAsync, ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
 import { join } from "path";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel } from "@/lib/gemini";
 import {
   AnalysisZ,
   geminiResponseSchema,
@@ -161,7 +162,7 @@ async function generateAnalysis(
 must be plain decimal seconds between 0 and ${duration.toFixed(1)}.`;
 
     const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       contents: createUserContent([
         createPartFromUri(fileUri, mimeType),
         prompt,
@@ -374,6 +375,7 @@ export async function POST(
   { params }: { params: Promise<{ videoId: string }> }
 ) {
   const { videoId } = await params;
+  const requestedModel = (await request.json().catch(() => null))?.model;
 
   if (!/^[\w-]+$/.test(videoId)) {
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
@@ -403,7 +405,9 @@ export async function POST(
   // Gemini is optional for a cutdown rebuild and for a dry-run master
   let ai: GoogleGenAI | null = null;
   try {
-    ai = getGeminiClient();
+    const model = await projectModel(videoId, requestedModel || (project?.kind === "master" ? project.model : undefined));
+    ai = getGeminiClient(model);
+    await saveProjectModel(videoId, model);
   } catch (error) {
     const optional =
       project?.kind === "cutdown" ||
@@ -473,7 +477,7 @@ export async function POST(
     const stored: Analysis = {
       videoId,
       analyzedAt: new Date().toISOString(),
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       summary: analysis.summary,
       hook_description: analysis.hook_description,
       format: analysis.format,

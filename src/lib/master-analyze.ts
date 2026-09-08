@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import { createPartFromUri, createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
-import { GEMINI_MODEL } from "./gemini";
+import { getGeminiModel } from "./gemini";
 import { getBrandConfig } from "./config";
 import type { Analysis, GeminiAnalysis } from "./analysis-schema";
 import type { MasterProjectMeta, TimingSource } from "./project-meta";
@@ -164,7 +164,7 @@ async function callGemini<T>(
             lastError instanceof Error ? lastError.message.slice(0, 300) : "invalid JSON"
           }). Return ONLY valid JSON matching the provided schema.`;
     const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       contents: createUserContent([...parts, prompt]),
       config: { responseMimeType: "application/json", responseSchema },
     });
@@ -477,7 +477,7 @@ export async function analyzeMaster(
   const stored: MasterSegments = MasterSegmentsZ.parse({
     videoId,
     analyzedAt: new Date().toISOString(),
-    model: dryRun ? "dry-run" : GEMINI_MODEL,
+    model: dryRun ? "dry-run" : getGeminiModel(ai),
     timing_source: engine,
     whisperx,
     words,

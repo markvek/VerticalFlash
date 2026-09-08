@@ -1,8 +1,9 @@
+import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
 import type { GoogleGenAI } from "@google/genai";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel } from "@/lib/gemini";
 import { AnalysisZ, type Analysis } from "@/lib/analysis-schema";
 import {
   ShotRecommendationsZ,
@@ -91,9 +92,11 @@ export async function POST(
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
   }
 
+  let requestedModel: unknown;
   let source: PublishedSource | null = null;
   try {
     const body = await request.json().catch(() => null);
+    requestedModel = body?.model;
     if (body?.source) source = PublishedSourceZ.parse(body.source);
   } catch {
     return NextResponse.json(
@@ -123,7 +126,9 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    const model = await projectModel(videoId, requestedModel);
+    ai = getGeminiClient(model);
+    await saveProjectModel(videoId, model);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Gemini not configured" },
@@ -143,7 +148,7 @@ export async function POST(
     const stored: Variations = {
       videoId,
       generatedAt: new Date().toISOString(),
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       source,
       suggestions,
       usage: usage

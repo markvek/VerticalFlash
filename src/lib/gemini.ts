@@ -13,14 +13,21 @@ export {
   GEMINI_PRICE_OUT_PER_M,
 } from "./gemini-pricing";
 
-export function getGeminiClient(): GoogleGenAI {
+const selectedModels = new WeakMap<GoogleGenAI, string>();
+export function getGeminiModel(ai: GoogleGenAI | null): string { return ai ? selectedModels.get(ai) ?? GEMINI_MODEL : GEMINI_MODEL; }
+
+export function getGeminiClient(model = GEMINI_MODEL): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error(
       "GEMINI_API_KEY is not configured — add it to .env.local (from Google AI Studio)"
     );
   }
-  return new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({ apiKey });
+  selectedModels.set(ai, model);
+  const generate = ai.models.generateContent.bind(ai.models);
+  ai.models.generateContent = (params) => generate({ ...params, model: params.model === GEMINI_MODEL ? model : params.model });
+  return ai;
 }
 
 export type GeminiErrorKind =

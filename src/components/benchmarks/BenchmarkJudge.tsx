@@ -90,6 +90,11 @@ export function BenchmarkJudge({ runId }: BenchmarkJudgeProps) {
     () => run?.variants.filter((variant) => variant.status === "ready" && variant.output) ?? [],
     [run]
   );
+  const aiReview = run?.aiReviews.at(-1) ?? null;
+  const aiByVariant = useMemo(
+    () => new Map((aiReview?.reviews ?? []).map((review) => [review.variantId, review])),
+    [aiReview]
+  );
 
   const setScore = (variantId: string, metric: HumanScoreMetric, value: number) => {
     setRatings((current) => ({
@@ -204,13 +209,13 @@ export function BenchmarkJudge({ runId }: BenchmarkJudgeProps) {
 
                   <video
                     className="mt-4 aspect-[9/16] max-h-[520px] w-full rounded-md bg-black object-contain"
-                    src={`/api/downloads/${encodeURIComponent(variant.output!.filename)}`}
+                    src={run.execution ? `/api/benchmarks/${run.id}/preview/${variant.id}` : `/api/downloads/${encodeURIComponent(variant.output!.filename)}`}
                     controls
                     preload="metadata"
                   />
 
                   <div className="mt-5 grid gap-3">
-                    {HUMAN_SCORE_METRICS.map((metric) => (
+                    {HUMAN_SCORE_METRICS.filter(metric => metric !== "broll_fit" || !run?.execution || run.execution.input.request.allow_broll).map((metric) => (
                       <label key={metric} className="grid grid-cols-[96px_1fr_28px] items-center gap-3 text-sm">
                         <span className="font-medium">{METRIC_LABELS[metric]}</span>
                         <input
@@ -238,6 +243,29 @@ export function BenchmarkJudge({ runId }: BenchmarkJudgeProps) {
                     </label>
                     <div className="text-sm text-muted-foreground">Score {scoreSummary(scores, wouldPost[variant.id] ?? false)}</div>
                   </div>
+
+                  {aiByVariant.has(variant.id) && (
+                    <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 p-3 text-xs">
+                      <div className="flex items-center justify-between font-medium">
+                        <span>
+                          AI judge · virality
+                          {aiReview?.winnerVariantId === variant.id && (
+                            <span className="ml-1 rounded bg-primary px-1 text-primary-foreground">top pick</span>
+                          )}
+                        </span>
+                        <span className="tabular-nums">{Math.round(aiByVariant.get(variant.id)!.virality)}/100</span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+                        {HUMAN_SCORE_METRICS.filter(metric => metric !== "broll_fit" || !run?.execution || run.execution.input.request.allow_broll).map((metric) => (
+                          <span key={metric}>{METRIC_LABELS[metric]} {aiByVariant.get(variant.id)!.scores[metric]}</span>
+                        ))}
+                        <span>{aiByVariant.get(variant.id)!.wouldPost ? "Would post" : "Would not post"}</span>
+                      </div>
+                      {aiByVariant.get(variant.id)!.rationale && (
+                        <p className="mt-2 text-muted-foreground">{aiByVariant.get(variant.id)!.rationale}</p>
+                      )}
+                    </div>
+                  )}
 
                   <label className="mt-4 block space-y-2 text-sm">
                     <span className="font-medium">Notes</span>
@@ -282,6 +310,7 @@ export function BenchmarkJudge({ runId }: BenchmarkJudgeProps) {
                     <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{variant.blindLabel}</div>
                     <div className="mt-1 font-semibold">{benchmarkProviderLabel(variant.provider)}</div>
                     <div className="mt-1 text-xs text-muted-foreground">Human {variant.humanScore == null ? "Pending" : variant.humanScore.toFixed(1)}</div>
+                    <div className="text-xs text-muted-foreground">AI virality {variant.aiJudgeScore == null ? "Pending" : variant.aiJudgeScore.toFixed(1)}</div>
                   </div>
                 ))}
               </div>

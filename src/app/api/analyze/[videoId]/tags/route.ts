@@ -1,7 +1,8 @@
+import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel } from "@/lib/gemini";
 import {
   AnalysisZ,
   GeminiShotTagsZ,
@@ -116,7 +117,7 @@ every shot_index from the input exactly once.`,
           ];
 
     const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       contents: createUserContent(parts),
       config: {
         responseMimeType: "application/json",
@@ -161,6 +162,7 @@ export async function POST(
   { params }: { params: Promise<{ videoId: string }> }
 ) {
   const { videoId } = await params;
+  const requestedModel = (await request.json().catch(() => null))?.model;
 
   if (!/^[\w-]+$/.test(videoId)) {
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
@@ -182,7 +184,9 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    const model = await projectModel(videoId, requestedModel);
+    ai = getGeminiClient(model);
+    await saveProjectModel(videoId, model);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Gemini not configured" },
@@ -216,7 +220,7 @@ export async function POST(
         tags: tagsByIndex.get(shot.index) ?? shot.tags,
       })),
       taggedAt: new Date().toISOString(),
-      tagModel: GEMINI_MODEL,
+      tagModel: getGeminiModel(ai),
       tagUsage: usage
         ? {
             promptTokens: (usage.promptTokenCount as number) ?? undefined,

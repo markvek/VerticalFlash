@@ -1,3 +1,4 @@
+import { nativeModel } from "@/lib/models/native";
 import { after, NextRequest, NextResponse } from "next/server";
 import { ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { isValidMusicFilename } from "@/lib/music-schema";
@@ -16,6 +17,7 @@ const MAX_CLIPS = 20;
 // clips. Body: { clips: string[] (in order), title, timing_engine }.
 export async function POST(request: NextRequest) {
   let body: {
+    model?: unknown;
     clips?: unknown;
     title?: unknown;
     timing_engine?: unknown;
@@ -26,6 +28,9 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
+
+  let model: string;
+  try { model = nativeModel(body.model); } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : "Invalid model" }, { status: 400 }); }
 
   const clips = Array.isArray(body.clips)
     ? body.clips.filter((c): c is string => typeof c === "string")
@@ -69,11 +74,11 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: `Clip not found in the library: ${clip}` }, { status: 400 });
         }
       }
-      const job = await createMasterJob({ clips, title, timingEngine });
+      const job = await createMasterJob({ clips, title, timingEngine, model });
       after(() => runMasterJob(job.videoId));
       return NextResponse.json(MasterJobStatusZ.parse(job), { status: 202 });
     }
-    const result = await assembleMaster({ clips, title, timingEngine });
+    const result = await assembleMaster({ clips, title, timingEngine, model });
     return NextResponse.json({
       filename: result.filename,
       videoId: result.videoId,

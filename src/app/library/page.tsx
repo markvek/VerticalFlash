@@ -1,5 +1,6 @@
 "use client";
 
+import { LibraryUpload } from "@/components/form/LibraryUpload";
 import { useEffect, useRef, useState } from "react";
 import type { LibraryClip, ClipLibrary } from "@/lib/library-schema";
 import { useBrand } from "@/app/context/brand";
@@ -114,7 +115,7 @@ export default function LibraryPage() {
     }
   };
 
-  if (loading)
+  if (loading && !library)
     return (
       <div className="downloads-layout flex items-center justify-center min-h-screen">
         <p className="text-foreground">Loading clip library...</p>
@@ -153,6 +154,8 @@ export default function LibraryPage() {
             {library?.videos.length || 0} videos in library
           </p>
         </div>
+
+        <LibraryUpload onAdded={async () => { await loadLibrary(); }} />
 
         {error && (
           <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3">

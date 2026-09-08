@@ -1,5 +1,7 @@
 "use client";
 
+import { NativeModelSelector } from "@/components/form/NativeModelSelector";
+
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { MusicPicker } from "@/components/form/MusicPicker";
@@ -19,6 +21,7 @@ function CreateForm() {
   const searchParams = useSearchParams();
   const musicFirst = searchParams.get("flow") === "music";
 
+  const [model, setModel] = useState("");
   const [track, setTrack] = useState<MusicTrack | null>(null);
   const [duration, setDuration] = useState<number>(
     PROMPT_FLOW_DEFAULT_SECONDS
@@ -60,6 +63,7 @@ function CreateForm() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          model,
           flow: musicFirst ? "music" : "prompt",
           prompt,
           music_filename: track?.filename ?? null,
@@ -186,6 +190,7 @@ function CreateForm() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-5">
+          <NativeModelSelector value={model} onChange={setModel} disabled={submitting} />
           {musicFirst ? (
             <>
               {songField}

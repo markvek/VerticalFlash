@@ -1,5 +1,7 @@
 "use client";
 
+import { NativeModelSelector } from "@/components/form/NativeModelSelector";
+
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, ReactNode } from "react";
 import { flushSync } from "react-dom";
@@ -112,6 +114,7 @@ function beatMatchesSegment(beat: Beat, segment: Segment): boolean {
 }
 
 export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
+  const [model, setModel] = useState("");
   const [segments, setSegments] = useState<MasterSegments | null>(null);
   const [storyboards, setStoryboards] = useState<MasterStoryboards | null>(null);
   const [activeStoryboardId, setActiveStoryboardId] = useState<string | null>(
@@ -416,7 +419,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       const res = await fetch(`/api/master/${videoId}/storyboards`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, model: model || undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Failed (HTTP ${res.status})`);
@@ -504,6 +507,8 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
             {storyboards?.storyboards.length ? "Create More Ideas" : "Create Ideas"}
           </button>
         </div>
+      <NativeModelSelector value={model} onChange={setModel} disabled={generating} />
+
       {(!storyboards || controlsOpen) && (
         <div className="flex flex-col gap-3">
           <div className="grid gap-3 sm:grid-cols-2">

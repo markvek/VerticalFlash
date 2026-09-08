@@ -2,6 +2,8 @@
 // by the downloads listing (last-edited mtime), delete, and fork so a new
 // sidecar kind only has to be registered once.
 export const SIDECAR_KINDS = [
+  "broll",
+  "model-selection",
   "recommendations",
   "generation",
   "edit-notes",

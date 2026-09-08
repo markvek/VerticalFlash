@@ -1,7 +1,7 @@
 import { createUserContent } from "@google/genai";
 import { getBrandConfig } from "./config";
 import type { GoogleGenAI } from "@google/genai";
-import { GEMINI_MODEL } from "./gemini";
+import { getGeminiModel } from "./gemini";
 import type { Analysis } from "./analysis-schema";
 import type { ShotRecommendations } from "./recommendation-schema";
 import type { ClipLibrary } from "./library-schema";
@@ -186,7 +186,7 @@ export async function generateVariations(
             lastError instanceof Error ? lastError.message : "invalid JSON"
           }). Return ONLY valid JSON matching the provided schema.`;
     const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       contents: createUserContent([prompt]),
       config: {
         responseMimeType: "application/json",

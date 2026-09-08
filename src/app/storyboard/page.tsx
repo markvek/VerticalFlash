@@ -1,6 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NativeModelSelector } from "@/components/form/NativeModelSelector";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { LibraryUpload } from "@/components/form/LibraryUpload";
 import { useRouter } from "next/navigation";
 import type { ClipLibrary, LibraryClip } from "@/lib/library-schema";
 import { useBrand } from "@/app/context/brand";
@@ -19,20 +22,6 @@ interface WhisperXStatus {
   model: string;
 }
 
-interface UploadItem {
-  id: string;
-  file: File;
-  progress: number; // 0-100 (bytes sent)
-  status: "queued" | "uploading" | "processing" | "done" | "error";
-  message?: string;
-  savedAs?: string;
-}
-
-interface UploadResponse {
-  clips: LibraryClip[];
-  errors: Array<{ name: string; error: string }>;
-}
-
 function formatSeconds(s: number | null | undefined): string {
   if (s == null || !Number.isFinite(s)) return "?:??";
   const m = Math.floor(s / 60);
@@ -45,56 +34,16 @@ function stripExtension(name: string): string {
   return dot > 0 ? name.slice(0, dot) : name;
 }
 
-// One file per request so the progress bar is per file (XHR is the only
-// way to observe upload progress from the browser)
-function uploadFile(
-  file: File,
-  analyze: boolean,
-  onProgress: (fraction: number) => void
-): Promise<UploadResponse> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const url = analyze ? "/api/library/upload?analyze=1" : "/api/library/upload";
-    xhr.open("POST", url);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(e.loaded / e.total);
-    };
-    xhr.onerror = () => reject(new Error("Network error during upload"));
-    xhr.onload = () => {
-      let data: unknown = null;
-      try {
-        data = JSON.parse(xhr.responseText);
-      } catch {
-        // non-JSON body (proxy error page etc.)
-      }
-      if (xhr.status >= 200 && xhr.status < 300 && data) {
-        resolve(data as UploadResponse);
-      } else {
-        const message =
-          (data as { error?: string } | null)?.error ||
-          `Upload failed (HTTP ${xhr.status})`;
-        reject(new Error(message));
-      }
-    };
-    const form = new FormData();
-    form.append("files", file, file.name);
-    xhr.send(form);
-  });
-}
-
 export default function StoryboardPage() {
   const router = useRouter();
   const brand = useBrand();
 
+  const [model, setModel] = useState("");
   const [library, setLibrary] = useState<ClipLibrary | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [libraryLoading, setLibraryLoading] = useState(true);
 
-  const [uploads, setUploads] = useState<UploadItem[]>([]);
-  const [analyzeUploads, setAnalyzeUploads] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const uploadingRef = useRef(false);
+  const [uploadsBusy, setUploadsBusy] = useState(false);
 
   const [selected, setSelected] = useState<string[]>([]);
   const [title, setTitle] = useState("");
@@ -177,99 +126,6 @@ export default function StoryboardPage() {
     });
   };
 
-  const updateUpload = (id: string, patch: Partial<UploadItem>) => {
-    setUploads((current) =>
-      current.map((u) => (u.id === id ? { ...u, ...patch } : u))
-    );
-  };
-
-  const startUploads = async (files: File[]) => {
-    if (files.length === 0) return;
-    const items: UploadItem[] = files.map((file) => ({
-      id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      file,
-      progress: 0,
-      status: "queued",
-    }));
-    setUploads((current) => [...current, ...items]);
-
-    if (uploadingRef.current) return; // the running loop picks new items up
-    uploadingRef.current = true;
-    try {
-      // Drain the queue sequentially (items added mid-run are included)
-      let pending = items;
-      while (pending.length > 0) {
-        for (const item of pending) {
-          updateUpload(item.id, { status: "uploading", progress: 0 });
-          try {
-            const result = await uploadFile(item.file, analyzeUploads, (fraction) => {
-              updateUpload(item.id, {
-                progress: Math.round(fraction * 100),
-                status: fraction >= 1 ? "processing" : "uploading",
-              });
-            });
-            const clip = result.clips[0];
-            const failure = result.errors.find(
-              (e) => e.name === item.file.name || e.name === clip?.filename
-            );
-            if (clip) {
-              updateUpload(item.id, {
-                status: "done",
-                progress: 100,
-                savedAs: clip.filename,
-                message: failure?.error,
-              });
-              addClip(clip.filename);
-            } else {
-              updateUpload(item.id, {
-                status: "error",
-                message: failure?.error ?? "Upload failed",
-              });
-            }
-          } catch (e) {
-            updateUpload(item.id, {
-              status: "error",
-              message: e instanceof Error ? e.message : "Upload failed",
-            });
-          }
-        }
-        await loadLibrary();
-        pending = [];
-        setUploads((current) => {
-          pending = current.filter((u) => u.status === "queued");
-          return current;
-        });
-        // Let the state read above settle before looping
-        await new Promise((r) => setTimeout(r, 0));
-      }
-    } finally {
-      uploadingRef.current = false;
-    }
-  };
-
-  const onFilesChosen = (list: FileList | null) => {
-    if (!list) return;
-    startUploads(Array.from(list));
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
-
-  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragging(false);
-    const files = Array.from(e.dataTransfer.files).filter((f) =>
-      /\.(mp4|mov|avi|mkv)$/i.test(f.name)
-    );
-    if (files.length === 0) {
-      setError("Drop video files (.mp4, .mov, .avi, .mkv)");
-      return;
-    }
-    setError(null);
-    startUploads(files);
-  };
-
-  const uploadsBusy = uploads.some(
-    (u) => u.status === "queued" || u.status === "uploading" || u.status === "processing"
-  );
   const canSubmit =
     selected.length > 0 && title.trim().length > 0 && !submitting && !uploadsBusy;
 
@@ -284,6 +140,7 @@ export default function StoryboardPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          model,
           clips: selected,
           title: title.trim(),
           timing_engine: timingEngine,
@@ -323,113 +180,9 @@ export default function StoryboardPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-8">
-          {/* Upload */}
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold">1. Upload footage</h2>
-            <div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragging(true);
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={onDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`rounded-lg border-2 border-dashed p-6 text-center cursor-pointer transition-colors ${
-                dragging
-                  ? "border-primary bg-primary/10"
-                  : "border-border hover:border-primary/60 hover:bg-muted/40"
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept="video/*"
-                onChange={(e) => onFilesChosen(e.target.files)}
-                className="hidden"
-              />
-              <p className="text-sm text-foreground">
-                Drop video files here, or click to choose
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                .mp4, .mov, .avi, .mkv · up to 500 MB each · saved into your{" "}
-                <span className="font-mono">{brand.libraryDir}/</span> folder
-              </p>
-            </div>
+          <LibraryUpload onBusy={setUploadsBusy} onAdded={async clips => { clips.forEach(c => addClip(c.filename)); await loadLibrary(); }} />
 
-            <label className="flex items-start gap-2 text-xs text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={analyzeUploads}
-                onChange={(e) => setAnalyzeUploads(e.target.checked)}
-                className="mt-0.5"
-              />
-              <span>
-                Also analyze uploads with Gemini for B-roll reuse (costs tokens)
-              </span>
-            </label>
-
-            {uploads.length > 0 && (
-              <ul className="space-y-1.5">
-                {uploads.map((u) => (
-                  <li
-                    key={u.id}
-                    className="rounded-lg border border-border px-3 py-2 text-xs"
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="truncate text-foreground">
-                        {u.file.name}
-                        {u.savedAs && u.savedAs !== u.file.name
-                          ? ` → ${u.savedAs}`
-                          : ""}
-                      </span>
-                      <span
-                        className={`shrink-0 ${
-                          u.status === "error"
-                            ? "text-red-500"
-                            : u.status === "done"
-                              ? "text-green-600"
-                              : "text-muted-foreground"
-                        }`}
-                      >
-                        {u.status === "queued" && "Queued"}
-                        {u.status === "uploading" && `Uploading ${u.progress}%`}
-                        {u.status === "processing" &&
-                          (analyzeUploads ? "Probing + analyzing…" : "Probing…")}
-                        {u.status === "done" && "Added"}
-                        {u.status === "error" && "Failed"}
-                      </span>
-                    </div>
-                    {(u.status === "uploading" || u.status === "processing") && (
-                      <div className="mt-1.5 h-1 rounded bg-muted overflow-hidden">
-                        <div
-                          className={`h-full bg-primary ${
-                            u.status === "processing" ? "animate-pulse" : ""
-                          }`}
-                          style={{ width: `${u.progress}%` }}
-                        />
-                      </div>
-                    )}
-                    {u.message && (
-                      <p
-                        className={`mt-1 break-words ${
-                          u.status === "error" ? "text-red-500" : "text-amber-600"
-                        }`}
-                      >
-                        {u.message}
-                      </p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <p className="text-xs text-muted-foreground">
-              Large files: drop them into the{" "}
-              <span className="font-mono">{brand.libraryDir}/</span> folder
-              instead, then click Refresh.
-            </p>
-          </section>
+          <NativeModelSelector value={model} onChange={setModel} disabled={submitting} />
 
           {/* Library picker */}
           <section className="space-y-3">
