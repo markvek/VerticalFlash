@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "verticalflash": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/verticalflash-agent-kit/mcp/server.mjs"],
+      "env": { "VERTICALFLASH_URL": "http://localhost:3000" }
+    }
+  }
+}
