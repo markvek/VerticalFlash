@@ -231,6 +231,40 @@ const availabilityState = globalThis as typeof globalThis & {
     result: Promise<ModelOption[]>;
   };
 };
+
+async function providerAccessFailure(
+  response: Response,
+  keyVariable: string,
+): Promise<string> {
+  // Providers may echo credentials in their errors. Classify the response but
+  // return only our own text; never expose their raw message, code, or body.
+  const body: unknown = await response.json().catch(() => null);
+  const error =
+    body && typeof body === "object" && "error" in body ? body.error : null;
+  const code =
+    error && typeof error === "object" && "code" in error ? error.code : null;
+  const message =
+    typeof error === "string"
+      ? error
+      : error && typeof error === "object" && "message" in error &&
+          typeof error.message === "string"
+        ? error.message
+        : "";
+  const status = `HTTP ${response.status}`;
+  if (
+    code === "invalid_api_key" ||
+    /(?:incorrect|invalid)[\s\S]{0,30}(?:api[ _-]?key|x-api-key)|(?:api[ _-]?key|x-api-key)[\s\S]{0,30}(?:incorrect|invalid)/i.test(message)
+  )
+    return `Provider rejected ${keyVariable} (${status}). Replace it with a valid API key in .env.local and restart the app.`;
+  if (response.status === 401)
+    return `Provider authentication failed (${status}). Check ${keyVariable} in .env.local and restart the app after updating it.`;
+  if (response.status === 403)
+    return `Provider denied access to its model list (${status}). Check this API key's permissions and account access.`;
+  if (response.status === 429)
+    return `Provider model-list check was limited (${status}). Check provider quota and rate limits, then retry.`;
+  return `Provider access check failed (${status}). Check provider configuration and service availability.`;
+}
+
 export async function checkedModelOptions(): Promise<ModelOption[]> {
   // Only a digest is kept as the cache key; credential values never reach the UI.
   const { createHash } = await import("crypto");
@@ -271,9 +305,7 @@ export async function checkedModelOptions(): Promise<ModelOption[]> {
           signal: AbortSignal.timeout(15000),
         });
         if (!response.ok)
-          throw new Error(
-            `Provider access check failed (HTTP ${response.status})`,
-          );
+          throw new Error(await providerAccessFailure(response, p.key));
         const data = await response.json();
         const ids = new Set<string>(
           (data.data ?? data.models ?? []).map(
@@ -281,12 +313,41 @@ export async function checkedModelOptions(): Promise<ModelOption[]> {
               (m.id ?? m.name ?? "").replace(/^models\//, ""),
           ),
         );
-        return options.map((o) => ({
-          ...o,
-          available: ids.has(o.model),
-          reason: ids.has(o.model)
-            ? null
-            : "Model was not returned by this provider’s model list",
+        return await Promise.all(options.map(async (o): Promise<ModelOption> => {
+          if (ids.has(o.model)) return { ...o, available: true, reason: null };
+          // Claude lists canonical IDs, but accepts aliases for generation.
+          // Resolve missing names through its API instead of guessing a suffix.
+          if (p.provider === "claude") {
+            try {
+              const resolved = await fetch(
+                `https://api.anthropic.com/v1/models/${encodeURIComponent(o.model)}`,
+                { headers, signal: AbortSignal.timeout(15000) },
+              );
+              if (!resolved.ok)
+                return {
+                  ...o,
+                  available: false,
+                  reason: resolved.status === 404
+                    ? "Claude could not find this model or alias for your account. Check BENCHMARK_CLAUDE_MODELS."
+                    : await providerAccessFailure(resolved, p.key),
+                };
+              const model = await resolved.json();
+              if (typeof model?.id !== "string" || !model.id)
+                throw new Error("Invalid model response");
+              return { ...o, available: true, reason: null };
+            } catch {
+              return {
+                ...o,
+                available: false,
+                reason: "Claude model lookup failed. Retry the access check.",
+              };
+            }
+          }
+          return {
+            ...o,
+            available: false,
+            reason: "Model was not returned by this provider’s model list",
+          };
         }));
       } catch (e) {
         return options.map((o) => ({

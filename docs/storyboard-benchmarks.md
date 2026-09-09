@@ -23,6 +23,32 @@ To compare multiple models from one provider, explicitly select **Choose any fou
 models**. Unavailable providers are never automatically replaced with Gemini.
 The model controls check the provider model lists and disable unavailable
 choices. Access to a listed model does not guarantee generation quota.
+Claude's list contains dated IDs for some model versions; configured aliases
+such as `claude-opus-4-5` are verified with its
+[model lookup API](https://platform.claude.com/docs/en/api/http/models/retrieve).
+Both aliases and canonical IDs are accepted. For a benchmark pinned to a
+specific version, configure the canonical ID returned by Claude.
+
+### Troubleshooting provider access
+
+The access check calls each provider's model-list endpoint before generation.
+An explicit rejected-key error means that provider rejected the configured
+credential; changing the storyboard prompt or model ID cannot fix that check.
+Replace the indicated key in the `.env.local` belonging to the running checkout
+and restart the app. Keep one entry per variable to avoid ambiguous edits.
+OpenAI uses `OPENAI_API_KEY`, Claude uses `ANTHROPIC_API_KEY`, and xAI uses
+`XAI_API_KEY`. These must be API credentials from the respective provider.
+
+OpenAI can return `401` with `invalid_api_key`; Claude can return `401` with
+`authentication_error`; xAI can report an incorrect key with `400`. The UI
+classifies these responses without exposing provider messages that may echo a
+credential. After authentication succeeds, verify the configured model IDs are
+available to the account, then check generation billing/quota separately.
+Model-list checks are cached for up to 60 seconds.
+
+References: [OpenAI errors](https://developers.openai.com/api/docs/guides/error-codes),
+[Claude errors](https://platform.claude.com/docs/en/api/errors), and
+[xAI errors](https://docs.x.ai/developers/debugging).
 
 Shared transcript preparation and missing B-roll catalog descriptions currently
 use Gemini, so `GEMINI_API_KEY` is required regardless of the four selected models.
