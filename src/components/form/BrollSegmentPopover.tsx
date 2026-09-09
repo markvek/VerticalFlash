@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { X } from "lucide-react";
+import { Crop, X } from "lucide-react";
 import type { BrollCandidate } from "@/lib/broll-schema";
 
 // The picker for one B-roll segment, anchored under its block on the
@@ -23,6 +23,7 @@ export interface PopoverSegment {
 }
 
 export interface BrollSegmentPopoverProps {
+  onFrame?: () => void;
   segment: PopoverSegment;
   anchorRect: { left: number; right: number; top: number; bottom: number } | null;
   thumbSrc: (filename: string) => string;
@@ -47,6 +48,7 @@ const CONFIDENCE: Record<BrollCandidate["confidence"], string> = {
 const WIDTH = 400;
 
 export function BrollSegmentPopover({
+  onFrame,
   segment,
   anchorRect,
   thumbSrc,
@@ -78,9 +80,10 @@ export function BrollSegmentPopover({
   }, [onClose]);
 
   const duration = segment.end - segment.start;
+  const width = Math.min(WIDTH, window.innerWidth - 16);
   const left = anchorRect
-    ? Math.max(8, Math.min(anchorRect.left, window.innerWidth - WIDTH - 8))
-    : window.innerWidth / 2 - WIDTH / 2;
+    ? Math.max(8, Math.min(anchorRect.left, window.innerWidth - width - 8))
+    : (window.innerWidth - width) / 2;
   const top = anchorRect ? Math.min(anchorRect.bottom + 8, window.innerHeight - 420) : 120;
   const clipStart = segment.clip?.clip_start ?? 0;
 
@@ -89,7 +92,7 @@ export function BrollSegmentPopover({
       ref={ref}
       role="dialog"
       aria-label={`B-roll segment ${segment.phrase || segment.id}`}
-      style={{ left, top, width: WIDTH }}
+      style={{ left, top: Math.max(8, top), width, maxHeight: "calc(100dvh - 16px)", overflowY: "auto" }}
       className="downloads-layout fixed z-50 rounded-lg border border-violet-500/50 bg-background p-3 text-foreground shadow-xl flex flex-col gap-2"
     >
       <div className="flex items-start justify-between gap-2">
@@ -146,6 +149,7 @@ export function BrollSegmentPopover({
               from {clipStart.toFixed(1)}s in the clip
             </p>
             <div className="flex flex-wrap gap-1.5 mt-0.5">
+              {onFrame && <button onClick={onFrame} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted"><Crop size={14} />Frame &amp; Layers</button>}
               <button
                 onClick={onRepickMoment}
                 disabled={busy != null}

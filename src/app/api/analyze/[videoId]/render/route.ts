@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readFraming } from "@/lib/framing-store";
+import { shotSources } from "@/lib/framing-sources";
 import { ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
 import { basename, join } from "path";
@@ -140,6 +142,7 @@ export async function POST(
     }
 
     const library = await loadLibrary();
+    const framing = await readFraming(videoId);
 
     // A cutdown renders its source shots from the footage ranges (master
     // or attached clips), so timeline edits need no re-cut of the short
@@ -158,7 +161,7 @@ export async function POST(
     const broll: BrollRenderSegment[] = brollTrack.segments.flatMap((s) => {
       const r = brollResolved.get(s.id);
       if (s.status !== "placed" || !s.clip || !r?.valid) return [];
-      return [{ id: s.id, filename: s.clip.filename, start: r.start, end: r.end, clip_start: s.clip.clip_start, phrase: s.phrase }];
+      return [{ id: s.id, filename: s.clip.filename, start: r.start, end: r.end, clip_start: s.clip.clip_start, phrase: s.phrase, layer: framing.broll[s.id] }];
     });
 
     let editNotes: Record<string, string> = {};
@@ -178,6 +181,8 @@ export async function POST(
     }
 
     const manifest = await renderRemake({
+      framing,
+      originalSources: await shotSources(videoPath, analysis),
       videoId,
       analysis,
       recs,

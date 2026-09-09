@@ -1,6 +1,9 @@
 "use client";
 
 import { playMedia } from "@/lib/media-playback";
+import { FramingEditor } from "@/components/form/FramingEditor";
+import { useFraming } from "@/components/form/useFraming";
+import type { FramingDocument } from "@/lib/framing-schema";
 
 import { useParams, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
@@ -137,6 +140,7 @@ const FILL_LABELS: Record<string, string> = {
 };
 
 interface RenderManifest {
+  framing?: FramingDocument;
   videoId: string;
   renderedAt: string;
   sourceVideo: string;
@@ -369,7 +373,7 @@ function VideoViewerContent() {
   const [allClipsOpen, setAllClipsOpen] = useState(false);
   const [trimmingShot, setTrimmingShot] = useState<number | null>(null);
   const [panelTab, setPanelTab] = useState<
-    "video" | "clips" | "storyboards" | "render" | "captions"
+    "video" | "shots" | "clips" | "storyboards" | "render" | "captions"
   >("video");
   // Master projects open their saved storyboards once analysis has loaded.
   const tabParamApplied = useRef(false);
@@ -425,6 +429,9 @@ function VideoViewerContent() {
   const [brollBusy, setBrollBusy] = useState<string | null>(null);
   // The segment the clip library modal is picking for (null = shot mode)
   const [brollLibraryFor, setBrollLibraryFor] = useState<string | null>(null);
+  const [frameTarget, setFrameTarget] = useState<string | null>(null);
+  const [framingControlsTarget, setFramingControlsTarget] = useState<HTMLDivElement | null>(null);
+  const framing = useFraming(analysis ? videoId : null, `${analysis?.shotsEditedAt ?? ""}:${JSON.stringify(recs?.shots ?? [])}`);
 
   useEffect(() => {
     if (!videoId) return;
@@ -893,6 +900,7 @@ function VideoViewerContent() {
     setRendering(true);
     setRenderError(null);
     try {
+      await framing.flush();
       const res = await fetch(`/api/analyze/${videoId}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -926,6 +934,7 @@ function VideoViewerContent() {
   const selectShot = (index: number, seek = true) => {
     if (!analysis) return;
     const clamped = Math.max(0, Math.min(index, analysis.shots.length - 1));
+    setFrameTarget(null);
     // Clicking the shot that's already selected toggles play/pause
     // instead of re-seeking to its start
     if (seek && clamped === selectedShot) {
@@ -955,7 +964,7 @@ function VideoViewerContent() {
     if (masterBacked) {
       const beat = beatMap[selectedShot];
       if (!beat) return;
-      if (t >= beat.source_end - 0.02) {
+      if (!video.paused && t >= beat.source_end - 0.02) {
         if (loopShot) {
           video.currentTime = beat.source_start;
           setPlayheadTime(beat.start);
@@ -972,7 +981,7 @@ function VideoViewerContent() {
         }
         return;
       }
-      if (t < beat.source_start - 0.05) {
+      if (t < beat.source_start - 0.05 || t > beat.source_end + 0.05) {
         // Scrubbed with the native controls: follow whichever shot the
         // master time falls in, else stay put
         const mapped = footageToShortTime(beatMap, t);
@@ -1228,6 +1237,14 @@ function VideoViewerContent() {
     recs?.shots.find((s) => s.shot_index === selectedShot)
       ?.selected_filename ?? null;
   const selectedKeepSource = keepSourceByShot.get(selectedShot) === true;
+  const seekPreview = (time: number) => {
+    if (!analysis) return;
+    const s = analysis.shots.find(s => time >= s.start_time && time < s.end_time) ?? shot;
+    if (!s) return;
+    setSelectedShot(s.index); setPlayheadTime(time);
+    if (videoRef.current) videoRef.current.currentTime = masterBacked
+      ? (s.source_start ?? s.start_time) + time - s.start_time : time;
+  };
   // Cutdown beats map 1:1 to shots, so a shot's section is its beat's
   const sectionForShot = (index: number) =>
     project?.kind === "cutdown" ? (project.beats[index]?.section ?? null) : null;
@@ -1285,6 +1302,13 @@ function VideoViewerContent() {
     s.source_clip ? { ...s, source_start: undefined, source_end: undefined } : s
   );
   const brollResolved = brollTrack && analysis ? resolveBrollTrack(brollTrack, brollShots, masterWords) : [];
+  const previewBroll = (brollTrack?.segments ?? []).flatMap(segment => {
+    const range = brollResolved.find(r => r.id === segment.id);
+    return segment.status === "placed" && segment.clip && range?.valid
+      ? [{ id: segment.id, url: clipSrc(segment.clip.filename), start: range.start, end: range.end,
+          clipStart: segment.clip.clip_start ?? 0, label: segment.phrase || segment.clip.filename }] : [];
+  });
+  const previewSources = framing.sources[String(selectedShot)] ?? [];
   const brollBlocks = (brollTrack?.segments ?? []).map((s) => {
     const r = brollResolved.find((x) => x.id === s.id);
     return {
@@ -1362,6 +1386,7 @@ function VideoViewerContent() {
     brollUpdate(id, (s) => ({ ...s, anchor, phrase: phraseForAnchor(anchor, masterWords) }));
   };
   const brollRemove = (id: string) => {
+    if (frameTarget === id) setFrameTarget(null);
     if (brollSelected === id) setBrollSelected(null);
     saveBroll((brollTrack?.segments ?? []).filter((s) => s.id !== id));
   };
@@ -1442,10 +1467,11 @@ function VideoViewerContent() {
 
   const renderStale =
     !!render &&
-    ((!!analysis?.shotsEditedAt &&
+    (((framing.document?.revision ?? 0) !== (render.framing?.revision ?? 0)) ||
+      framing.status === "Unsaved" || framing.status === "Saving" || framing.status === "Not saved" ||
+      (!!analysis?.shotsEditedAt &&
       new Date(render.renderedAt).getTime() < new Date(analysis.shotsEditedAt).getTime()) ||
       (!!brollTrack &&
-        brollTrack.segments.length > 0 &&
         new Date(render.renderedAt).getTime() < new Date(brollTrack.updatedAt).getTime()));
 
   // What a render would use per shot: your pick, the top match, or nothing
@@ -1830,17 +1856,20 @@ function VideoViewerContent() {
     </div>
   );
 
-  // Video Editing / B-Roll Clips / (Storyboards) / Render Details / Captions
+  // Video Editing / Shots / B-Roll Clips / (Storyboards) / Render Details / Captions
   const tabClass = (tab: typeof panelTab, first = false) =>
-    `px-4 py-2 transition-colors ${first ? "" : "border-l border-border "}${
+    `shrink-0 whitespace-nowrap px-4 py-2 transition-colors ${first ? "" : "border-l border-border "}${
       panelTab === tab
         ? "bg-primary/15 text-primary"
         : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
     }`;
   const tabBar = (
-    <div className="flex rounded-lg border border-border overflow-hidden self-start text-xs font-semibold">
+    <div className="flex max-w-full rounded-lg border border-border overflow-x-auto self-start text-xs font-semibold" aria-label="Editor views">
       <button onClick={() => setPanelTab("video")} className={tabClass("video", true)}>
         Video Editing
+      </button>
+      <button onClick={() => setPanelTab("shots")} className={tabClass("shots")}>
+        Shots
       </button>
       <button onClick={() => setPanelTab("clips")} className={tabClass("clips")}>
         B-Roll Clips
@@ -1928,9 +1957,9 @@ function VideoViewerContent() {
         )}
 
         {/* Ribbon 1: video player + the active tab's panel */}
-        <div className={analysis ? "grid gap-4 md:grid-cols-[minmax(0,320px)_1fr]" : "flex flex-col gap-4"}>
-          <div className="flex flex-col gap-4">
-            <div className="rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center">
+        <div className={analysis ? "grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]" : "flex flex-col gap-4"}>
+          <div className="mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0">
+            <div className={shot && (panelTab === "video" || panelTab === "shots" || panelTab === "clips") ? "hidden" : "rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center"}>
               {playbackError ? (
                 <div className="p-6 text-center">
                   <p className="text-sm font-medium text-white">
@@ -1967,6 +1996,15 @@ function VideoViewerContent() {
                 )
               )}
             </div>
+            {shot && (panelTab === "video" || panelTab === "shots" || panelTab === "clips") && (
+              <FramingEditor state={framing} clock={videoRef} shot={shot} source={previewSources} controlsTarget={framingControlsTarget}
+                broll={previewBroll} target={previewBroll.some(s => s.id === frameTarget) ? frameTarget : null}
+                onTarget={setFrameTarget} onSeek={seekPreview}
+                getTime={() => {
+                  const time = videoRef.current?.currentTime ?? 0;
+                  return masterBacked ? shot.start_time + time - (shot.source_start ?? shot.start_time) : time;
+                }} />
+            )}
           </div>
 
           <div className="flex flex-col gap-3 min-w-0">
@@ -1979,9 +2017,15 @@ function VideoViewerContent() {
 
             {analysis && (
               <div className="flex flex-col gap-3 min-w-0">
-                {/* Video Editing: one card per shot — time, section, what
-                    happens, the fix note, and the text on/under the shot */}
                 {panelTab === "video" && (
+                  <section aria-label="Video editing" className="flex w-full max-w-lg flex-col gap-4">
+                    <h2 className="text-sm font-semibold">Frame &amp; Layers</h2>
+                    <div ref={setFramingControlsTarget} />
+                  </section>
+                )}
+                {/* Shots: one card per shot — time, section, what
+                    happens, the fix note, and the text on/under the shot */}
+                {panelTab === "shots" && (
                   <div className="flex gap-3 overflow-x-auto pb-2 items-stretch">
                     {analysis.shots.map((s) => {
                       const section = sectionForShot(s.index);
@@ -2542,7 +2586,7 @@ function VideoViewerContent() {
                           </p>
                         ))}
                         <p className="text-[10px] text-yellow-700/80 dark:text-yellow-400/80 mt-0.5">
-                          Add a ✎ fix note on a shot (Video Editing tab or the
+                          Add a ✎ fix note on a shot (Shots tab or the
                           render output below) to direct how to solve it (e.g.
                           &ldquo;loop the clip to fill the shot&rdquo;), then
                           re-render.
@@ -3079,6 +3123,10 @@ function VideoViewerContent() {
               thumbSrc={thumbSrc}
               clipSrc={clipSrc}
               busy={brollBusy}
+              onFrame={seg.status === "placed" && seg.clip ? () => {
+                setFrameTarget(seg.id); setBrollSelected(null); setPanelTab("video");
+                videoRef.current?.pause(); seekPreview(block.start);
+              } : undefined}
               onClose={() => setBrollSelected(null)}
               onUseCandidate={(c) => brollSetClip(seg.id, c.filename, c.clip_start)}
               onOpenLibrary={() => {

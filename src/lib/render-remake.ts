@@ -1,4 +1,7 @@
 import { promises as fs } from "fs";
+import { encodeFramedClip } from "./framing-render";
+import type { FramingDocument, Layer } from "./framing-schema";
+import type { FrameSource } from "./framing-sources";
 import { execFileAsync } from "./ffmpeg";
 import { join } from "path";
 import type { GoogleGenAI } from "@google/genai";
@@ -143,7 +146,7 @@ function majorityGroup(groups: Array<TimeGroup | null>): TimeGroup | null {
 // project's own source video at its own start/end, never claims a library
 // clip, casts no time-of-day vote, and needs no trim window. A fix note
 // that names a clip still overrides it (the directive wins).
-function planShots(
+export function planShots(
   analysis: Analysis,
   recs: ShotRecommendations,
   sourceVideo: string,
@@ -868,6 +871,8 @@ async function assembleShotAudio(
 }
 
 export interface RenderInput {
+  framing?: FramingDocument;
+  originalSources?: Record<string, FrameSource[]>;
   videoId: string;
   analysis: Analysis;
   recs: ShotRecommendations;
@@ -902,6 +907,7 @@ export interface RenderInput {
 }
 
 export interface BrollRenderSegment {
+  layer?: Layer;
   id: string;
   filename: string;
   start: number;
@@ -941,10 +947,15 @@ async function overlayBroll(
         `B-roll ${seg.filename} has ${available.toFixed(1)}s from ${start.toFixed(1)}s but the segment runs ${duration.toFixed(1)}s — last frame held`
       );
     }
-    const segPath = join(workDir, `broll_${String(applied.length).padStart(2, "0")}.mp4`);
+    const segPath = join(workDir, `broll_${String(applied.length).padStart(2, "0")}.${seg.layer ? "mov" : "mp4"}`);
     try {
-      await encodeClipSegment(clipPath, start, duration, pad, segPath);
+      if (seg.layer) {
+        await encodeFramedClip({ path: clipPath, start, duration, available, output: segPath, framing: seg.layer.framing, transparent: true });
+      } else {
+        await encodeClipSegment(clipPath, start, duration, pad, segPath);
+      }
     } catch (error) {
+      if (seg.layer) throw error;
       console.error(`B-roll segment encode failed for ${seg.filename}:`, error);
       warnings.push(`B-roll ${seg.filename}: ffmpeg failed — segment at ${seg.start.toFixed(1)}s skipped`);
       continue;
@@ -963,11 +974,31 @@ async function overlayBroll(
 
   const filters: string[] = [];
   let prev = "[0:v]";
+  // The top active segment controls the main picture, underneath all B-roll.
+  if (applied.some(seg => {
+    const layer = segments.find(s => s.id === seg.id)?.layer;
+    return layer && (!layer.mainVisible || layer.mainOpacity < 1);
+  })) {
+    filters.push(`[0:v]split=${applied.length + 1}[base]${applied.map((_, i) => `[main${i}]`).join("")}`);
+    prev = "[base]";
+    applied.forEach((seg, i) => {
+      const layer = segments.find(s => s.id === seg.id)?.layer;
+      const enable = `gte(t,${seg.start.toFixed(3)})*lt(t,${seg.end.toFixed(3)})`;
+      filters.push(`[main${i}]split[bg${i}][picture${i}]`);
+      filters.push(`[bg${i}]drawbox=c=${layer?.background ?? "#000000"}:t=fill[color${i}]`);
+      filters.push(`[picture${i}]format=rgba,colorchannelmixer=aa=${layer?.mainVisible === false ? 0 : layer?.mainOpacity ?? 1}[dim${i}]`);
+      filters.push(`[color${i}][dim${i}]overlay=format=auto[mainview${i}]`);
+      filters.push(`${prev}[mainview${i}]overlay=enable='${enable}':format=auto[under${i}]`);
+      prev = `[under${i}]`;
+    });
+  }
   applied.forEach((seg, i) => {
     const s = seg.start.toFixed(3);
     const e = seg.end.toFixed(3);
-    filters.push(`[${i + 1}:v]setpts=PTS-STARTPTS+${s}/TB[o${i}]`);
-    filters.push(`${prev}[o${i}]overlay=eof_action=pass:enable='between(t,${s},${e})'[v${i}]`);
+    const layer = segments.find(s => s.id === seg.id)?.layer;
+    const enable = `gte(t,${s})*lt(t,${e})`;
+    filters.push(`[${i + 1}:v]setpts=PTS-STARTPTS+${s}/TB,format=rgba,colorchannelmixer=aa=${layer?.opacity ?? 1}[o${i}]`);
+    filters.push(`${prev}[o${i}]overlay=eof_action=pass:enable='${enable}':format=auto[v${i}]`);
     prev = `[v${i}]`;
   });
   const outPath = join(workDir, "out-broll.mp4");
@@ -999,6 +1030,8 @@ export async function renderRemake(
   input: RenderInput
 ): Promise<RenderManifest> {
   const {
+    framing,
+    originalSources,
     videoId,
     analysis,
     recs,
@@ -1139,7 +1172,24 @@ export async function renderRemake(
         // cutdown's master/attached clip when known, else the short itself;
         // never a library clip, so it skips resolveClipPath
         try {
-          await encodeClipSegment(
+          const frame = framing?.shots[String(p.shot_index)];
+          const spans = originalSources?.[String(p.shot_index)];
+          if (frame && spans?.length) {
+            const parts: string[] = [];
+            for (const [part, span] of spans.entries()) {
+              const output = join(workDir, `framed_${i}_${part}.mp4`);
+              if (span.warning) warnings.push(span.warning);
+              await encodeFramedClip({ path: span.path, start: span.start, duration: span.end - span.start,
+                output, framing: frame, offset: span.offset, totalDuration: p.duration });
+              parts.push(output);
+            }
+            if (parts.length === 1) await fs.rename(parts[0], segPath);
+            else {
+              const list = join(workDir, `framed_${i}.txt`);
+              await fs.writeFile(list, parts.map(path => `file '${path.replaceAll("'", "'\\''")}'`).join("\n"));
+              await execFileAsync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", segPath]);
+            }
+          } else await encodeClipSegment(
             sourceShots?.[p.shot_index]?.path ?? (await requireProjectPath(sourceVideo)),
             p.trim_start ?? p.start_time,
             p.duration,
@@ -1147,6 +1197,7 @@ export async function renderRemake(
             segPath
           );
         } catch (error) {
+          if (framing?.shots[String(p.shot_index)]) throw error;
           await slugAfterFailure(p, error, segPath);
         }
       } else if (p.clip) {
@@ -1176,7 +1227,12 @@ export async function renderRemake(
         p.padded_seconds = Math.round(pad * 100) / 100;
 
         try {
-          if (pad > 0.001 && p.fill === "loop") {
+          const frame = framing?.shots[String(p.shot_index)];
+          if (frame) {
+            await encodeFramedClip({ path: resolveClipPath(videoId, p.clip), start, duration: p.duration,
+              available, output: segPath, framing: frame,
+              fill: p.fill === "loop" || p.fill === "slow_mo" || p.fill === "black" ? p.fill : "clone" });
+          } else if (pad > 0.001 && p.fill === "loop") {
             await encodeLoopSegment(
               resolveClipPath(videoId, p.clip),
               start,
@@ -1205,6 +1261,7 @@ export async function renderRemake(
             );
           }
         } catch (error) {
+          if (framing?.shots[String(p.shot_index)]) throw error;
           await slugAfterFailure(p, error, segPath);
         }
       } else {
@@ -1254,6 +1311,7 @@ export async function renderRemake(
         brollApplied = result.applied;
       } catch (error) {
         console.error("B-roll overlay failed:", error);
+        if (broll.some(s => s.layer)) throw error;
         warnings.push("Compositing the B-roll track failed — rendered without it");
       }
     }
@@ -1592,6 +1650,7 @@ export async function renderRemake(
     await fs.rename(finalPath, renderVideoPath(videoId));
 
     const manifest: RenderManifest = RenderManifestZ.parse({
+      framing,
       videoId,
       renderedAt: new Date().toISOString(),
       sourceVideo,
