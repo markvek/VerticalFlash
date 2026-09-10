@@ -38,6 +38,8 @@ test("framing clamps progress, preserves aspect ratio, and validates limits", ()
     assert.ok(fit.width <= 1080 && fit.height <= 1920);
   }
   assert.equal(FramingZ.safeParse({ ...frame, start: { ...frame.start, zoom: Infinity } }).success, false);
+  assert.equal(FramingZ.safeParse({ ...frame, start: { ...frame.start, zoom: 0.5 } }).success, true);
+  assert.equal(FramingZ.safeParse({ ...frame, start: { ...frame.start, zoom: 0.24 } }).success, false);
   assert.equal(FramingZ.safeParse({ ...frame, start: { ...frame.start, x: -0.1 } }).success, false);
 });
 

@@ -1,9 +1,12 @@
 import { z } from "zod";
 
+export const MIN_FRAME_ZOOM = 0.25;
+export const MAX_FRAME_ZOOM = 4;
+
 export const FramePointZ = z.object({
   x: z.number().finite().min(0).max(1),
   y: z.number().finite().min(0).max(1),
-  zoom: z.number().finite().min(1).max(4),
+  zoom: z.number().finite().min(MIN_FRAME_ZOOM).max(MAX_FRAME_ZOOM),
   // Canvas-relative translation, separate from legacy crop alignment.
   offsetX: z.number().finite().min(-100).max(100).optional(),
   offsetY: z.number().finite().min(-100).max(100).optional(),
