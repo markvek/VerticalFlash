@@ -9,7 +9,7 @@ import type { AssembleMasterInput } from "./master-assemble";
 
 const JobZ = MasterJobStatusZ.extend({
   workerId: z.string(),
-  input: z.object({ clips: z.array(z.string()), title: z.string(), timingEngine: z.enum(TIMING_SOURCES).nullable() }),
+  input: z.object({ clips: z.array(z.string()), title: z.string(), timingEngine: z.enum(TIMING_SOURCES).nullable(), model: z.string().optional() }),
 });
 type Job = z.infer<typeof JobZ>;
 const state = globalThis as typeof globalThis & { masterJobWorkerId?: string; masterJobsRunning?: Set<string> };
@@ -84,7 +84,7 @@ export async function runMasterJob(videoId: string) {
     if (project?.kind !== "master") throw new Error("Could not read the storyboard project");
     job = { ...job, status: "analyzing", error: null };
     await writeJob(job);
-    await analyzeAndStoreMaster(storyboardDryRun() ? null : getGeminiClient(), videoPath, videoId, project, duration);
+    await analyzeAndStoreMaster(storyboardDryRun() ? null : getGeminiClient(job.input.model), videoPath, videoId, project, duration);
     await writeJob({ ...job, status: "ready" });
   } catch (error) {
     console.error("Storyboard processing failed:", error);

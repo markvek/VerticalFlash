@@ -243,3 +243,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
 ## License
 
 [MIT](LICENSE)
+
+### Storyboard model benchmarks
+
+Start on `/storyboard`, choose **Benchmark**, and compare four models using one
+shared prompt, core-footage selection, and optional B-roll pool. Each version
+generates its own storyboard and automatically applies B-roll for comparison.
+See [setup, workflow, and validation](docs/storyboard-benchmarks.md).

@@ -1,6 +1,7 @@
+import type { StructuredGenerator } from "./models/schema";
 import { createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
-import { GEMINI_MODEL } from "./gemini";
+import { GEMINI_MODEL, getGeminiModel } from "./gemini";
 import { getBrandConfig } from "./config";
 import type { CatalogSummary } from "./shot-plan";
 import {
@@ -303,10 +304,12 @@ export async function generateStoryboards(
   segments: MasterSegments,
   request: StoryboardRequest,
   duration: number,
-  catalog: CatalogSummary[] | null
+  catalog: CatalogSummary[] | null,
+  generator?: StructuredGenerator,
+  selectedModel?: string
 ): Promise<MasterStoryboards> {
   const lengths = lengthsFor(request);
-  const dryRun = storyboardDryRun();
+  const dryRun = !generator && storyboardDryRun();
   const wordMode = segments.timing_source === "whisperx" && segments.segments.every((segment) => segment.start_word != null && segment.end_word != null);
 
   let storyboards: Storyboard[];
@@ -315,7 +318,7 @@ export async function generateStoryboards(
   if (dryRun) {
     storyboards = heuristicStoryboards(segments, request, lengths);
   } else {
-    if (!ai) throw new Error("Gemini is not configured");
+    if (!ai && !generator) throw new Error("Model is not configured");
     const basePrompt = buildPrompt(segments, request, lengths, catalog);
     let lastError: unknown;
     let parsed:
@@ -329,7 +332,7 @@ export async function generateStoryboards(
           : `${basePrompt}\n\nIMPORTANT: Your previous response was rejected (${
               lastError instanceof Error ? lastError.message.slice(0, 300) : "invalid JSON"
             }). Return ONLY valid JSON matching the provided schema.`;
-      const response = await ai.models.generateContent({
+      const response = generator ? await generator({ prompt, schema: wordMode ? geminiWordStoryboardsResponseSchema : geminiTimeStoryboardsResponseSchema }) : await ai!.models.generateContent({
         model: GEMINI_MODEL,
         contents: createUserContent([prompt]),
         config: {
@@ -344,7 +347,7 @@ export async function generateStoryboards(
         parsed = wordMode
           ? { mode: "word", data: GeminiWordStoryboardsZ.parse(JSON.parse(rawText)) }
           : { mode: "time", data: GeminiTimeStoryboardsZ.parse(JSON.parse(rawText)) };
-        usage = response.usageMetadata as Record<string, unknown> | undefined;
+        usage = ("usageMetadata" in response ? response.usageMetadata : response) as Record<string, unknown> | undefined;
       } catch (error) {
         lastError = error;
         console.error(
@@ -431,7 +434,7 @@ export async function generateStoryboards(
   return MasterStoryboardsZ.parse({
     videoId: segments.videoId,
     generatedAt: new Date().toISOString(),
-    model: dryRun ? "dry-run" : GEMINI_MODEL,
+    model: dryRun ? "dry-run" : selectedModel ?? getGeminiModel(ai),
     timing_source: segments.timing_source,
     request,
     storyboards,

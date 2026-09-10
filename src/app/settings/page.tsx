@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ArrowDownToLine, BarChart3, Check, FileText, Monitor, Plug, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentSettingsBoard } from "@/components/settings/AgentSettingsBoard";
@@ -31,7 +32,7 @@ export default function SettingsPage() {
             </div>
           </div>
           <Button asChild size="lg">
-            <a href="http://localhost:3001/benchmarks">Open benchmarks</a>
+            <Link href="/benchmarks">Open benchmarks</Link>
           </Button>
         </div>
       </section>

@@ -65,6 +65,7 @@ export type MasterSourceClip = z.infer<typeof MasterSourceClipZ>;
 
 export const MasterProjectMetaZ = z.object({
   kind: z.literal("master"),
+  model: z.string().optional(),
   title: z.string(),
   createdAt: z.string(),
   sourceClips: z.array(MasterSourceClipZ),

@@ -1,3 +1,4 @@
+import { nativeModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { execFileAsync, ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
@@ -19,6 +20,7 @@ const MAX_SECONDS = 180;
 // route plans shots from it instead of watching a video.
 export async function POST(request: NextRequest) {
   let body: {
+    model?: string;
     flow?: string;
     prompt?: string;
     music_filename?: string | null;
@@ -29,6 +31,9 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
+
+  let model: string;
+  try { model = nativeModel(body.model); } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : "Invalid model" }, { status: 400 }); }
 
   const kind = body.flow === "music" ? "music" : "prompt";
   if (!PROJECT_KINDS.includes(kind)) {
@@ -160,6 +165,7 @@ export async function POST(request: NextRequest) {
     names[filename] = displayName;
     await fs.writeFile(NAMES_FILE, JSON.stringify(names, null, 2));
 
+    await saveProjectModel(videoId, model);
     return NextResponse.json({ filename, videoId, displayName });
   } catch (error) {
     console.error("project creation failed:", error);

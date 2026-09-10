@@ -1,5 +1,7 @@
 "use client";
 
+import { NativeModelSelector } from "@/components/form/NativeModelSelector";
+
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -53,6 +55,7 @@ function median(values: number[]): number | null {
 
 export default function IteratePage() {
   const router = useRouter();
+  const [model, setModel] = useState("");
   const [videos, setVideos] = useState<TikTokVideoStats[]>([]);
   const [user, setUser] = useState<TikTokUserStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -190,19 +193,25 @@ export default function IteratePage() {
         window.dispatchEvent(new Event("downloads-changed"));
       }
 
-      let analysis = await fetch(`/api/analyze/${v.id}`).then((r) =>
+      const prepare = await fetch("/api/iterate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename, model }) });
+      const prepared = await prepare.json();
+      if (!prepare.ok) throw new Error(prepared.error || "Could not prepare iteration");
+      filename = prepared.filename;
+      const projectId = prepared.videoId;
+
+      let analysis = await fetch(`/api/analyze/${projectId}`).then((r) =>
         r.ok ? r.json() : null
       );
       if (!analysis) {
         setStage(v.id, { stage: "analyzing", filename });
-        const res = await fetch(`/api/analyze/${v.id}`, { method: "POST" });
+        const res = await fetch(`/api/analyze/${projectId}`, { method: "POST" });
         analysis = await res.json();
         if (!res.ok) throw new Error(analysis?.error || "Analysis failed");
       }
 
       if (!analysis.taggedAt) {
         setStage(v.id, { stage: "tagging", filename });
-        const res = await fetch(`/api/analyze/${v.id}/tags`, {
+        const res = await fetch(`/api/analyze/${projectId}/tags`, {
           method: "POST",
         });
         if (!res.ok) {
@@ -211,7 +220,7 @@ export default function IteratePage() {
         }
       }
 
-      const existing = await fetch(`/api/analyze/${v.id}/variations`).then(
+      const existing = await fetch(`/api/analyze/${projectId}/variations`).then(
         (r) => r.ok
       );
       if (!existing) {
@@ -230,7 +239,7 @@ export default function IteratePage() {
           newFollowersGained: v.newFollowersGained ?? null,
           benchmark,
         };
-        const res = await fetch(`/api/analyze/${v.id}/variations`, {
+        const res = await fetch(`/api/analyze/${projectId}/variations`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ source }),
@@ -260,6 +269,7 @@ export default function IteratePage() {
   return (
     <div className="flex flex-col items-center min-h-screen p-4 bg-background text-foreground">
       <div className="flex flex-col gap-6 w-full max-w-4xl">
+        <NativeModelSelector value={model} onChange={setModel} />
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
             <h1 className="text-3xl font-bold text-foreground">

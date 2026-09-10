@@ -4,6 +4,7 @@ import { join } from "path";
 import {
   BENCHMARK_PROVIDERS,
   BENCHMARK_STAGES,
+  BenchmarkAiReviewZ,
   BenchmarkHumanReviewZ,
   BenchmarkProviderZ,
   BenchmarkRunZ,
@@ -36,12 +37,13 @@ function runPath(id: string): string {
   return join(BENCHMARKS_DIR, `${id}.json`);
 }
 
-async function writeRun(run: BenchmarkRun): Promise<BenchmarkRun> {
+export async function writeRun(run: BenchmarkRun): Promise<BenchmarkRun> {
   await fs.mkdir(BENCHMARKS_DIR, { recursive: true });
   const parsed = BenchmarkRunZ.parse(run);
   const path = runPath(parsed.id);
-  await fs.writeFile(`${path}.tmp`, JSON.stringify(parsed, null, 2));
-  await fs.rename(`${path}.tmp`, path);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(parsed, null, 2));
+  await fs.rename(temporary, path);
   return parsed;
 }
 
@@ -142,6 +144,7 @@ export async function createBenchmarkRun(input: CreateBenchmarkInput): Promise<B
     },
     variants,
     humanReviews: [],
+    aiReviews: [],
   };
   return writeRun(run);
 }
@@ -155,6 +158,7 @@ export async function assignBenchmarkVariantOutput(
   if (!run) throw new Error("Benchmark not found");
   const variant = run.variants.find((entry) => entry.id === variantId);
   if (!variant) throw new Error("Variant not found");
+  if (run.execution || run.humanReviews.length) throw new Error("Benchmark outputs are locked");
   variant.output = output;
   variant.status = output ? "ready" : "waiting";
   variant.error = null;
@@ -164,7 +168,7 @@ export async function assignBenchmarkVariantOutput(
   return writeRun(run);
 }
 
-export async function addBenchmarkHumanReview(
+async function addBenchmarkHumanReviewUnlocked(
   id: string,
   review: unknown
 ): Promise<BenchmarkRun> {
@@ -180,7 +184,7 @@ export async function addBenchmarkHumanReview(
   if (readyVariants.size === 0) {
     throw new Error("Assign at least one provider output before reviewing");
   }
-  if (parsed.winnerVariantId && !knownVariants.has(parsed.winnerVariantId)) {
+  if (parsed.winnerVariantId && !readyVariants.has(parsed.winnerVariantId)) {
     throw new Error("Winner must be one of this benchmark's variants");
   }
   for (const entry of parsed.reviews) {
@@ -192,6 +196,8 @@ export async function addBenchmarkHumanReview(
     }
   }
   const reviewedIds = new Set(parsed.reviews.map((entry) => entry.variantId));
+  if (reviewedIds.size !== parsed.reviews.length) throw new Error("Review each variant once");
+  if (run.execution && run.execution.status !== "complete") throw new Error("Wait until the benchmark completes before reviewing");
   const readyIds = Array.from(readyVariants.keys());
   for (const readyId of readyIds) {
     if (!reviewedIds.has(readyId)) {
@@ -203,11 +209,59 @@ export async function addBenchmarkHumanReview(
   for (const entry of parsed.reviews) {
     const variant = run.variants.find((candidate) => candidate.id === entry.variantId);
     if (!variant) continue;
-    const scores = Object.values(entry.scores);
+    const scores = Object.entries(entry.scores).filter(([key]) => key !== "broll_fit" || !run.execution || run.execution.input.request.allow_broll).map(([, value]) => value);
     const average = scores.reduce((sum, score) => sum + score, 0) / scores.length;
-    variant.humanScore = Math.round((average * 10 + (entry.wouldPost ? 5 : 0)) * 10) / 10;
+    variant.humanScore = Math.min(100, Math.round((average * 10 + (entry.wouldPost ? 5 : 0)) * 10) / 10);
   }
   run.updatedAt = new Date().toISOString();
   run.status = "reviewed";
   return writeRun(run);
+}
+
+const shared = globalThis as typeof globalThis & { benchmarkLocks?: Map<string, Promise<unknown>> };
+const locks = shared.benchmarkLocks ??= new Map<string, Promise<unknown>>();
+export async function withBenchmarkLock<T>(id: string, action: () => Promise<T>): Promise<T> {
+  const pending = (locks.get(id) ?? Promise.resolve()).catch(() => {}).then(action);
+  locks.set(id, pending);
+  try { return await pending; } finally { if (locks.get(id) === pending) locks.delete(id); }
+}
+export async function mutateBenchmark(id: string, update: (run: BenchmarkRun) => void) {
+  return withBenchmarkLock(id, async () => {
+    const run = await readBenchmarkRun(id);
+    if (!run) throw new Error("Benchmark not found");
+    update(run);
+    run.updatedAt = new Date().toISOString();
+    run.status = statusFor(run);
+    return writeRun(run);
+  });
+}
+export async function addBenchmarkHumanReview(id: string, review: unknown) {
+  return withBenchmarkLock(id, () => addBenchmarkHumanReviewUnlocked(id, review));
+}
+
+// Stores the AI judge's verdict (latest wins) and mirrors each variant's
+// predicted virality into its aiJudgeScore. Advisory: leaves humanScore alone.
+export async function setBenchmarkAiReview(
+  id: string,
+  review: unknown,
+): Promise<BenchmarkRun> {
+  return withBenchmarkLock(id, async () => {
+    const run = await readBenchmarkRun(id);
+    if (!run) throw new Error("Benchmark not found");
+    const parsed = BenchmarkAiReviewZ.parse(review);
+    const known = new Set(run.variants.map((variant) => variant.id));
+    for (const entry of parsed.reviews) {
+      if (!known.has(entry.variantId)) {
+        throw new Error("AI review contains an unknown variant");
+      }
+    }
+    run.aiReviews = [parsed];
+    for (const entry of parsed.reviews) {
+      const variant = run.variants.find((v) => v.id === entry.variantId);
+      if (variant) variant.aiJudgeScore = entry.virality;
+    }
+    run.updatedAt = new Date().toISOString();
+    run.status = statusFor(run);
+    return writeRun(run);
+  });
 }

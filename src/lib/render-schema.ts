@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { FramingDocumentZ } from "./framing-schema";
 import { TEXT_POSITIONS, TEXT_STYLE_PRESETS } from "./text-overlays-schema";
 
 // Fixed output format: the standard iPhone camera recording spec
@@ -63,6 +64,7 @@ export type RenderShot = z.infer<typeof RenderShotZ>;
 
 // Full stored manifest: renders/<videoId>.render.json
 export const RenderManifestZ = z.object({
+  framing: FramingDocumentZ.optional(),
   videoId: z.string(),
   renderedAt: z.string(),
   // null for prompt projects — there is no source TikTok, only the slate

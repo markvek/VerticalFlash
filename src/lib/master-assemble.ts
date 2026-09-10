@@ -178,6 +178,7 @@ export interface AssembleMasterInput {
   clips: string[];
   title: string;
   timingEngine: TimingSource | null;
+  model?: string;
 }
 
 export interface AssembleMasterResult {
@@ -245,6 +246,7 @@ export async function assembleMaster(
       createdAt: now,
       sourceClips,
       timingEngine: input.timingEngine,
+      model: input.model,
       // Flat fields other prompts may read
       caption: input.title,
       savedAt: now,

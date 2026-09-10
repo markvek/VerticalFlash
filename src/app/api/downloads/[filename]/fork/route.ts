@@ -187,6 +187,7 @@ export async function POST(
         await fs.readFile(join(RENDERS_DIR, `${srcId}.render.json`), "utf8")
       );
       manifest.videoId = newId;
+      if (manifest.framing) manifest.framing.videoId = newId;
       manifest.output = `${newId}.mp4`;
       // Prompt projects render with a null sourceVideo — keep it null
       if (manifest.sourceVideo != null) manifest.sourceVideo = newFile;

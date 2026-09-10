@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { createPartFromUri, createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
-import { GEMINI_MODEL } from "./gemini";
+import { getGeminiModel } from "./gemini";
 import {
   geminiResponseSchema,
   GeminiAnalysisZ,
@@ -209,7 +209,7 @@ must be plain decimal seconds between 0 and ${duration.toFixed(1)}, with the
 shots covering the whole length.`;
 
       const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: getGeminiModel(ai),
         contents: createUserContent(audioPart ? [audioPart, prompt] : [prompt]),
         config: {
           responseMimeType: "application/json",

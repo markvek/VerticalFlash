@@ -1,3 +1,4 @@
+import { BenchmarkExecutionZ, BenchmarkArtifactZ } from "./storyboard-benchmark-schema";
 import { z } from "zod";
 
 export const BENCHMARK_PROVIDERS = [
@@ -69,7 +70,8 @@ export const BenchmarkVariantZ = z.object({
   id: z.string().min(1),
   provider: BenchmarkProviderZ,
   blindLabel: z.string().min(1),
-  status: z.enum(["waiting", "ready", "failed"]),
+  status: z.enum(["waiting", "running", "ready", "failed"]),
+  artifact: BenchmarkArtifactZ.optional(),
   model: z.string().nullable(),
   output: z
     .object({
@@ -85,13 +87,15 @@ export const BenchmarkVariantZ = z.object({
   error: z.string().nullable(),
 });
 
+const MetricScoresZ = z.object(
+  Object.fromEntries(
+    HUMAN_SCORE_METRICS.map((metric) => [metric, z.number().int().min(1).max(10)])
+  ) as Record<HumanScoreMetric, z.ZodNumber>
+);
+
 export const HumanVariantReviewZ = z.object({
   variantId: z.string().min(1),
-  scores: z.object(
-    Object.fromEntries(
-      HUMAN_SCORE_METRICS.map((metric) => [metric, z.number().int().min(1).max(10)])
-    ) as Record<HumanScoreMetric, z.ZodNumber>
-  ),
+  scores: MetricScoresZ,
   wouldPost: z.boolean(),
   notes: z.string().max(2000),
 });
@@ -102,6 +106,24 @@ export const BenchmarkHumanReviewZ = z.object({
   reviewer: z.string().min(1),
   winnerVariantId: z.string().nullable(),
   reviews: z.array(HumanVariantReviewZ).min(1),
+});
+
+// AI judge: reads storyboard text only and predicts TikTok virality (0-100).
+// Advisory — sits alongside human reviews and never overwrites them.
+export const AiVariantReviewZ = z.object({
+  variantId: z.string().min(1),
+  virality: z.number().min(0).max(100),
+  scores: MetricScoresZ,
+  wouldPost: z.boolean(),
+  rationale: z.string().max(2000),
+});
+
+export const BenchmarkAiReviewZ = z.object({
+  id: z.string().min(1),
+  createdAt: z.string(),
+  judgeModel: z.string().min(1),
+  winnerVariantId: z.string().nullable(),
+  reviews: z.array(AiVariantReviewZ).min(1),
 });
 
 export const BenchmarkRunZ = z.object({
@@ -121,6 +143,8 @@ export const BenchmarkRunZ = z.object({
   }),
   variants: z.array(BenchmarkVariantZ).min(1),
   humanReviews: z.array(BenchmarkHumanReviewZ),
+  aiReviews: z.array(BenchmarkAiReviewZ).default([]),
+  execution: BenchmarkExecutionZ.optional(),
 });
 
 export type BenchmarkSource = z.infer<typeof BenchmarkSourceZ>;
@@ -128,6 +152,8 @@ export type BenchmarkVariant = z.infer<typeof BenchmarkVariantZ>;
 export type BenchmarkRun = z.infer<typeof BenchmarkRunZ>;
 export type BenchmarkHumanReview = z.infer<typeof BenchmarkHumanReviewZ>;
 export type HumanVariantReview = z.infer<typeof HumanVariantReviewZ>;
+export type BenchmarkAiReview = z.infer<typeof BenchmarkAiReviewZ>;
+export type AiVariantReview = z.infer<typeof AiVariantReviewZ>;
 
 export function benchmarkProviderLabel(provider: BenchmarkProvider): string {
   return BENCHMARK_PROVIDER_OPTIONS.find((option) => option.id === provider)?.label ?? provider;
