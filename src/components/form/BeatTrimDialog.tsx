@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "radix-ui";
 import { Play, X } from "lucide-react";
+import { MIN_SHOT_SECONDS } from "@/lib/shot-retime";
 import type { Beat, Sentence, Word } from "@/lib/segments-schema";
 import {
   endsSentence,
@@ -33,6 +34,8 @@ export interface BeatTrimDialogProps {
   onClose: () => void;
   onApply: (next: BeatTrim) => void;
   onSeek?: (seconds: number) => void;
+  busy?: boolean;
+  error?: string | null;
 }
 
 const fmt = (seconds: number) =>
@@ -51,9 +54,13 @@ export function BeatTrimDialog({
   onClose,
   onApply,
   onSeek,
+  busy = false,
+  error,
 }: BeatTrimDialogProps) {
-  const wordMode =
+  const [mode, setMode] = useState<"words" | "time">("words");
+  const hasWords =
     !!beat && !beat.source && beat.start_word != null && beat.end_word != null && words.length > 0;
+  const wordMode = hasWords && mode === "words";
   const offset = beat?.source?.offset ?? 0;
 
   const [s, setS] = useState(0);
@@ -64,6 +71,7 @@ export function BeatTrimDialog({
   // Fresh draft every time the dialog opens on a beat
   useEffect(() => {
     if (!beat) return;
+    setMode("words");
     setS(beat.start_word ?? 0);
     setE(beat.end_word ?? 0);
     setStartSec(Math.max(0, beat.start - offset));
@@ -97,7 +105,7 @@ export function BeatTrimDialog({
   const delta = draftSeconds - originalSeconds;
   const midStart = wordMode && !startsSentence(sentences, s);
   const midEnd = wordMode && !endsSentence(sentences, e);
-  const timeValid = !wordMode && endSec > startSec + 0.2 && startSec >= 0 && endSec <= sourceDuration + 0.05;
+  const timeValid = !wordMode && Number.isFinite(startSec) && Number.isFinite(endSec) && endSec - startSec >= MIN_SHOT_SECONDS - 0.000001 && startSec >= 0 && endSec <= sourceDuration + 0.001;
 
   // Click a word: move whichever edge is nearer to it
   const pick = (i: number) => {
@@ -108,6 +116,7 @@ export function BeatTrimDialog({
   };
 
   const apply = () => {
+    if (busy || draftSeconds < MIN_SHOT_SECONDS || (!wordMode && !timeValid)) return;
     if (wordMode) {
       onApply({
         start: times!.start,
@@ -144,8 +153,8 @@ export function BeatTrimDialog({
           </div>
           <Dialog.Description className="text-xs text-muted-foreground">
             {wordMode
-              ? "Click a word to move the nearest edge to it, or use the sentence shortcuts. The storyboard's target length is a goal — a whole sentence beats hitting the number."
-              : "This footage has no word timing; set the in and out points in seconds."}
+              ? "Click a word to move the nearest edge to it, or use the sentence shortcuts. Choose complete words or sentences, or switch to exact timing."
+              : "Set source start, source end, or duration in seconds. Changing duration moves the end."}
           </Dialog.Description>
 
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -168,6 +177,18 @@ export function BeatTrimDialog({
             )}
           </div>
 
+          {hasWords && <div className="mt-3 flex gap-2" aria-label="Length editing mode">
+            <button className={chip} aria-pressed={wordMode} onClick={() => {
+              if (!wordMode) {
+                const first = words.findIndex(w => w.end > startSec + offset);
+                const last = words.findLastIndex(w => w.start < endSec + offset);
+                const start = first < 0 ? words.length - 1 : first;
+                setS(start); setE(Math.max(start, last));
+              }
+              setMode("words");
+            }}>Transcript</button>
+            <button className={chip} aria-pressed={!wordMode} onClick={() => { if (times && (s !== beat.start_word || e !== beat.end_word)) { setStartSec(times.start - offset); setEndSec(times.end - offset); } setMode("time"); }}>Exact timing</button>
+          </div>}
           {wordMode ? (
             <>
               <div
@@ -238,7 +259,7 @@ export function BeatTrimDialog({
           ) : (
             <div className="mt-3 flex flex-wrap items-end gap-3 text-xs">
               <label className="flex flex-col gap-1">
-                In (s)
+                Source start (s)
                 <input
                   type="number"
                   step={0.1}
@@ -250,7 +271,7 @@ export function BeatTrimDialog({
                 />
               </label>
               <label className="flex flex-col gap-1">
-                Out (s)
+                Source end (s)
                 <input
                   type="number"
                   step={0.1}
@@ -261,10 +282,19 @@ export function BeatTrimDialog({
                   className="w-28 rounded-md border border-border bg-background px-2 py-1 font-mono"
                 />
               </label>
+              <label className="flex flex-col gap-1">
+                Duration (s)
+                <input type="number" step={0.1} min={MIN_SHOT_SECONDS} max={sourceDuration - startSec}
+                  value={Math.round((endSec - startSec) * 1000) / 1000}
+                  onChange={event => setEndSec(startSec + Number(event.target.value))}
+                  className="w-28 rounded-md border border-border bg-background px-2 py-1 font-mono" />
+              </label>
               <span className="text-muted-foreground">clip runs {sourceDuration.toFixed(1)}s</span>
             </div>
           )}
 
+          {(!wordMode && !timeValid || draftSeconds < MIN_SHOT_SECONDS) && <p className="mt-3 text-xs text-amber-500">Choose a range within the source, at least {MIN_SHOT_SECONDS}s long.</p>}
+          {error && <p role="alert" className="mt-3 text-xs text-red-400">{error}</p>}
           <div className="mt-4 flex flex-wrap items-center gap-2">
             {onSeek && (
               <button
@@ -280,10 +310,10 @@ export function BeatTrimDialog({
             </button>
             <button
               onClick={apply}
-              disabled={!wordMode && !timeValid}
+              disabled={busy || draftSeconds < MIN_SHOT_SECONDS || (!wordMode && !timeValid)}
               className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50"
             >
-              Apply
+              {busy ? "Saving…" : "Apply"}
             </button>
           </div>
         </Dialog.Content>

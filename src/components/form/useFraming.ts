@@ -126,7 +126,15 @@ export function useFraming(videoId: string | null, sourceVersion: string) {
     return () => { window.removeEventListener("beforeunload", beforeUnload); window.removeEventListener("click", navigate, true); };
   }, [flush]);
   void historyVersion;
-  return { document, sources, status, error, update, begin, commit, flush,
+  const replace = (next: FramingDocument | null) => {
+    if (timer.current) clearTimeout(timer.current);
+    current.current = saved.current = next;
+    transaction.current = null;
+    history.current = { past: [], future: [] };
+    setDocument(next); setStatus(next ? "Saved" : "Loading framing"); setError(null);
+    setHistoryVersion(v => v + 1);
+  };
+  return { document, sources, status, error, update, begin, commit, flush, replace,
     undo: () => travel("past"), redo: () => travel("future"),
     canUndo: history.current.past.length > 0, canRedo: history.current.future.length > 0 };
 }

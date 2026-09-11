@@ -42,7 +42,7 @@ export async function shotSources(videoPath: string, analysis: Analysis): Promis
         result[String(shot.index)] = [{ ...source, end, offset: 0, url: `/api/library/clips/${encodeURIComponent(source.filename)}` }];
       }
     } else {
-      result[String(shot.index)] = await originalSources(videoPath, shot.start_time, shot.end_time);
+      result[String(shot.index)] = await originalSources(videoPath, shot.source_start ?? shot.start_time, shot.source_end ?? shot.end_time);
       if (cutdown) result[String(shot.index)].forEach(s => { s.warning = "Original footage unavailable; using the assembled crop."; });
     }
   }

@@ -44,6 +44,7 @@ export interface TimelineResize {
   mode: "source" | "split";
   // Footage length, for clamping source-mode drags
   footageMax?: number;
+  boundsFor?: (index: number) => { min: number; max: number } | null;
   busy: boolean;
   onCommit: (edit: RetimeEdit) => void;
   // Source mode: pull a proposed footage time onto a word boundary and say
@@ -237,8 +238,9 @@ export function ShotTimeline({
   const clamp = (index: number, edge: "start" | "end", value: number): number => {
     const s = shots[index];
     if (resize?.mode === "source") {
-      const lo = edge === "end" ? (s.source_start ?? 0) + MIN_SHOT_SECONDS : 0;
-      const hi = edge === "end" ? (resize.footageMax ?? Infinity) : (s.source_end ?? Infinity) - MIN_SHOT_SECONDS;
+      const bounds = resize.boundsFor?.(index);
+      const lo = edge === "end" ? (s.source_start ?? 0) + MIN_SHOT_SECONDS : (bounds?.min ?? 0);
+      const hi = edge === "end" ? (bounds?.max ?? resize.footageMax ?? Infinity) : (s.source_end ?? Infinity) - MIN_SHOT_SECONDS;
       return Math.max(lo, Math.min(value, hi));
     }
     const next = shots[index + 1];

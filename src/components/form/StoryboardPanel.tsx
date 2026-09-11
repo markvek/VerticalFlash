@@ -8,7 +8,6 @@ import { flushSync } from "react-dom";
 import { Dialog } from "radix-ui";
 import { ChevronDown, ChevronRight, Loader2, Play, Plus, Square, X } from "lucide-react";
 import { StoryboardBeatCard } from "./StoryboardBeatCard";
-import { BeatTrimDialog, type BeatTrim } from "./BeatTrimDialog";
 import { beginMediaPlayback, isCurrentMediaPlayback, subscribeMediaPlayback } from "@/lib/media-playback";
 import type {
   Beat,
@@ -126,8 +125,6 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
   const [fullTranscriptOpen, setFullTranscriptOpen] = useState(true);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [segmentPickerOpen, setSegmentPickerOpen] = useState(false);
-  // Which beat of the active storyboard has its length editor open
-  const [trimIndex, setTrimIndex] = useState<number | null>(null);
 
   const [count, setCount] = useState(STORYBOARD_DEFAULT_COUNT);
   const [perIdea, setPerIdea] = useState(false);
@@ -714,12 +711,10 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
                   const rect = card.getBoundingClientRect();
                   event.dataTransfer.setDragImage(card, Math.max(0, event.clientX - rect.left), Math.max(0, event.clientY - rect.top));
                 }} onDragEnd={clearDrag}>
-                <StoryboardBeatCard beat={beat} segment={segment} index={index} count={activeStoryboard.beats.length} disabled={saving || accepting !== null}
+                <StoryboardBeatCard beat={beat} segment={segment} index={index} disabled={saving || accepting !== null}
                   onSeek={() => onSeek?.(beat.start, beat.source)}
-                  onMove={(to) => reorderBeat(activeStoryboard, index, to)}
-                  onRemove={() => commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.filter((_, i) => i !== index)))}
                   onNote={(note) => commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.map((value, i) => i === index ? { ...value, fix_note: note } : value)))}
-                  onTrim={() => setTrimIndex(index)} />
+                  />
                 </div>
               </Fragment>;
             })}
@@ -787,8 +782,8 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
 
       {dragPreview && <div ref={dragPreviewElement} aria-hidden="true" inert
         className="downloads-layout pointer-events-none fixed -left-[10000px] top-0 w-[224px] rounded-lg bg-background text-foreground">
-        <StoryboardBeatCard beat={segmentToBeat(dragPreview)} segment={dragPreview} index={0} count={1} disabled
-          onSeek={() => {}} onMove={() => {}} onRemove={() => {}} onNote={() => {}} />
+        <StoryboardBeatCard beat={segmentToBeat(dragPreview)} segment={dragPreview} index={0} disabled
+          onSeek={() => {}} onNote={() => {}} />
       </div>}
 
       <Dialog.Root open={segmentPickerOpen} onOpenChange={setSegmentPickerOpen}>
@@ -812,44 +807,6 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-
-      {activeStoryboard && trimIndex != null && activeStoryboard.beats[trimIndex] && (() => {
-        const beat = activeStoryboard.beats[trimIndex];
-        // How long the beat's source runs: the master (segments without a
-        // source) or the attached clip it came from
-        const sourceDuration = Math.max(
-          0,
-          ...segments.segments
-            .filter((segment) =>
-              beat.source
-                ? segment.source?.filename === beat.source.filename && segment.source.offset === beat.source.offset
-                : !segment.source
-            )
-            .map((segment) => segment.end_time - (beat.source?.offset ?? 0)),
-          ...(beat.source ? [] : segments.words.map((word) => word.end))
-        );
-        return (
-          <BeatTrimDialog
-            open
-            beat={beat}
-            index={trimIndex}
-            words={segments.words}
-            sentences={segments.sentences}
-            sourceDuration={sourceDuration}
-            onClose={() => setTrimIndex(null)}
-            onSeek={(seconds) => onSeek?.(seconds, beat.source)}
-            onApply={(next: BeatTrim) => {
-              setTrimIndex(null);
-              commitStoryboard(
-                withBeats(
-                  activeStoryboard,
-                  activeStoryboard.beats.map((value, i) => (i === trimIndex ? { ...value, ...next } : value))
-                )
-              );
-            }}
-          />
-        );
-      })()}
     </div>
   );
 }

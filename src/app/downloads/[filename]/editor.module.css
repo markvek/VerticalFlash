@@ -1,0 +1,63 @@
+.workspace {
+  min-width: 0;
+}
+
+.panel {
+  min-height: 0;
+  max-height: 60dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.timeline {
+  min-width: 0;
+  min-height: 0;
+}
+
+.timelineContent {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+@media (min-width: 1024px) {
+  .workspace {
+    /* Reserve space for playback controls and the timeline on shorter screens. */
+    --preview-height: min(568.889px, calc(60dvh - 76px));
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .workspace .content {
+    height: 100%;
+    min-height: 0;
+    gap: 12px;
+  }
+
+  .workspace .upper {
+    flex: 0 0 auto;
+    height: calc(var(--preview-height) + 44px);
+    min-height: 0;
+    grid-template-columns: minmax(0, calc(var(--preview-height) * 9 / 16)) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .workspace .player {
+    min-height: 0;
+  }
+
+  .workspace .panel {
+    height: 100%;
+    max-height: none;
+  }
+
+  .workspace .timeline {
+    flex: 1 1 0;
+  }
+
+  .workspace .timelineContent {
+    flex: 1 1 0;
+  }
+}

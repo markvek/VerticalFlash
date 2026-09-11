@@ -151,6 +151,8 @@ export async function POST(
     if (meta?.kind === "cutdown") {
       analysis = withSourceRanges(analysis, meta);
       sourceShots = await cutdownSourceShots(meta);
+    } else if (analysis.shots.some(s => s.source_start != null)) {
+      sourceShots = analysis.shots.map(s => ({ path: videoPath, filename: basename(videoPath), start: s.source_start ?? s.start_time, end: s.source_end ?? s.end_time, bounds: { min: 0, max: Infinity } }));
     }
 
     // The B-roll track: placed segments with a clip, resolved onto the

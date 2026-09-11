@@ -34,7 +34,6 @@ import {
 } from "@/lib/broll-resolve";
 import type { DownloadEntryProject } from "@/lib/download-types";
 import {
-  footageToShortTime,
   shortToFootageTime,
   type RetimeEdit,
 } from "@/lib/shot-retime";
@@ -45,6 +44,21 @@ import {
   TAIL_SECONDS,
 } from "@/lib/word-range";
 import type { Sentence, Word } from "@/lib/segments-schema";
+import { BeatTrimDialog } from "@/components/form/BeatTrimDialog";
+import type { Beat } from "@/lib/segments-schema";
+import type { TimelineOperation } from "@/lib/timeline-edit";
+import { Scissors, ArrowLeft, ArrowRight, Trash2, Undo2, Redo2 } from "lucide-react";
+import styles from "./editor.module.css";
+
+interface TimelineData {
+  version: string; canUndo: boolean; canRedo: boolean;
+  analysis: Analysis; project: DownloadEntryProject | null;
+  sources: Array<{ min: number; max: number; url: string } | null>;
+  words: Word[]; sentences: Sentence[];
+  sidecars: { recommendations: ShotRecommendations | null; generation: ShotGenerationsData | null;
+    "edit-notes": { notes: Record<string, string> } | null; "text-overlays": TextOverlaysData | null;
+    framing: FramingDocument | null; broll: BrollTrack | null };
+}
 
 type AudioMode = "music" | "original" | "none";
 
@@ -418,9 +432,14 @@ function VideoViewerContent() {
   const [nameDraft, setNameDraft] = useState("");
   // Timeline re-timing in flight
   const [retiming, setRetiming] = useState(false);
+  const [timelineData, setTimelineData] = useState<TimelineData | null>(null);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [trimBeat, setTrimBeat] = useState<Beat | null>(null);
+  const timelineSaving = useRef(false);
+  const resumeSource = useRef(false);
+  const pendingSourceSeek = useRef<number | null>(null);
   // A cutdown's master transcript, for snapping drags to words
   const [masterSegs, setMasterSegs] = useState<{ words: Word[]; sentences: Sentence[] } | null>(null);
-  const [masterDuration, setMasterDuration] = useState<number | null>(null);
   // The B-roll track: voice-anchored segments over the speaker
   const [brollTrack, setBrollTrack] = useState<BrollTrack | null>(null);
   const [brollSelected, setBrollSelected] = useState<string | null>(null);
@@ -447,54 +466,45 @@ function VideoViewerContent() {
     };
   }, [videoId]);
 
-  // A cutdown whose shots all live in the master plays the master directly
-  // and hops between the shots' footage ranges, so a length change on the
-  // timeline previews without re-cutting anything
-  const masterBacked =
-    project?.kind === "cutdown" &&
-    !!analysis &&
-    analysis.shots.length > 0 &&
-    analysis.shots.every((s) => s.source_start != null && s.source_end != null && !s.source_clip);
-  const beatMap = masterBacked
-    ? analysis!.shots.map((s) => ({
-        source_start: s.source_start!,
-        source_end: s.source_end!,
-        start: s.start_time,
-        end: s.end_time,
-      }))
-    : [];
+  // Play each clip from its original source, hopping between retained
+  // ranges and switching files for attached footage.
+  const sourceBacked = !!timelineData && timelineData.sources.every(Boolean);
+  const sourceOffset = (index: number) => timelineData?.sources[index]?.min ?? 0;
+  const beatMap = sourceBacked
+    ? (analysis?.shots ?? []).map((s, i) => ({
+        source_start: (s.source_start ?? s.start_time) - sourceOffset(i),
+        source_end: (s.source_end ?? s.end_time) - sourceOffset(i),
+        start: s.start_time, end: s.end_time,
+      })) : [];
   // The player's own time for a shot's start
   const playerTimeFor = (index: number): number => {
     const s = analysis?.shots[index];
     if (!s) return 0;
-    return masterBacked ? s.source_start! : s.start_time;
+    return sourceBacked ? (s.source_start ?? s.start_time) - sourceOffset(index) : s.start_time;
   };
 
+  const selectedSourceUrl = timelineData?.sources[selectedShot]?.url;
   useEffect(() => {
-    // Use the API route to serve the video file (the master for a
-    // master-backed cutdown)
-    setVideoUrl(
-      masterBacked && project?.kind === "cutdown"
-        ? `/api/downloads/${encodeURIComponent(project.masterFilename)}`
-        : `/api/downloads/${encodeURIComponent(filename)}`
-    );
+    // Loading source metadata may switch files after playback has begun.
+    if (videoRef.current && !videoRef.current.paused) resumeSource.current = true;
+    setVideoUrl(selectedSourceUrl ?? `/api/downloads/${encodeURIComponent(filename)}`);
     setPlaybackError(false);
-  }, [filename, masterBacked, project]);
+  }, [filename, selectedSourceUrl]);
 
-  // The master's word timing, for word snapping on the timeline
+  const hasAnalysis = !!analysis;
   useEffect(() => {
-    if (project?.kind !== "cutdown") return;
+    if (!videoId || !hasAnalysis) return;
     let cancelled = false;
-    fetch(`/api/master/${project.masterId}/segments`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!cancelled && data) setMasterSegs({ words: data.words ?? [], sentences: data.sentences ?? [] });
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [project]);
+    fetch(`/api/analyze/${videoId}/timeline`).then(async res => {
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Cannot load clip controls");
+      if (cancelled) return;
+      setTimelineData(data);
+      setTimelineError(data.sources.some((source: unknown) => !source) ? "Source footage is unavailable. Restore it to edit clip lengths or order." : null);
+      setMasterSegs({ words: data.words, sentences: data.sentences });
+    }).catch(e => { if (!cancelled) setTimelineError(e.message); });
+    return () => { cancelled = true; };
+  }, [videoId, hasAnalysis, analysis?.shotsEditedAt, analysis?.analyzedAt]);
 
   // TikTok connection state (single account; also surfaces the OAuth
   // redirect result via ?tiktok_connected / ?tiktok_error)
@@ -943,6 +953,8 @@ function VideoViewerContent() {
     }
     setSelectedShot(clamped);
     if (seek) {
+      pendingSourceSeek.current = null;
+      resumeSource.current = timelineData?.sources[clamped]?.url !== timelineData?.sources[selectedShot]?.url;
       setPlayheadTime(analysis.shots[clamped].start_time);
       const video = videoRef.current;
       if (video) {
@@ -954,14 +966,15 @@ function VideoViewerContent() {
 
   // Follow playback: move the playhead and highlight the shot under it
   const handleTimeUpdate = () => {
-    if (!analysis) return;
+    if (!analysis || trimBeat) return;
     const video = videoRef.current;
     if (!video) return;
     const t = video.currentTime;
+    // Ignore seek events and the old player while a different file loads.
+    if (sourceBacked && (video.seeking || (selectedSourceUrl && video.currentSrc !== new URL(selectedSourceUrl, window.location.href).href))) return;
 
-    // Master-backed cutdown: the player runs on the master, so hop between
-    // the shots' footage ranges and map its time onto the short's timeline
-    if (masterBacked) {
+    // Map source-local playback onto the edited timeline.
+    if (sourceBacked) {
       const beat = beatMap[selectedShot];
       if (!beat) return;
       if (!video.paused && t >= beat.source_end - 0.02) {
@@ -972,8 +985,10 @@ function VideoViewerContent() {
         }
         const next = beatMap[selectedShot + 1];
         if (next) {
+          pendingSourceSeek.current = null;
+          resumeSource.current = timelineData?.sources[selectedShot + 1]?.url !== timelineData?.sources[selectedShot]?.url;
           setSelectedShot(selectedShot + 1);
-          video.currentTime = next.source_start;
+          if (!resumeSource.current) video.currentTime = next.source_start;
           setPlayheadTime(next.start);
         } else {
           video.pause();
@@ -982,13 +997,9 @@ function VideoViewerContent() {
         return;
       }
       if (t < beat.source_start - 0.05 || t > beat.source_end + 0.05) {
-        // Scrubbed with the native controls: follow whichever shot the
-        // master time falls in, else stay put
-        const mapped = footageToShortTime(beatMap, t);
-        if (mapped) {
-          setSelectedShot(mapped.index);
-          setPlayheadTime(mapped.time);
-        }
+        // A newly mounted player can emit timeupdate at zero before its
+        // metadata seek. Keep the selected clip while it initializes.
+        video.currentTime = Math.max(beat.source_start, Math.min(beat.source_end, t));
         return;
       }
       setPlayheadTime(beat.start + (t - beat.source_start));
@@ -1016,33 +1027,65 @@ function VideoViewerContent() {
 
   // Timeline drag: persist the new shot times (the server re-lays the
   // cutdown's timeline and refreshes the affected frames)
-  const patchShotTimes = async (edit: RetimeEdit) => {
-    if (!videoId || retiming) return;
-    setRetiming(true);
+  const editClips = async (operation: TimelineOperation | { type: "undo" | "redo" }) => {
+    if (!videoId || !timelineData || timelineSaving.current) return false;
+    timelineSaving.current = true;
+    setRetiming(true); setTimelineError(null);
+    videoRef.current?.pause();
+    pendingSourceSeek.current = null; resumeSource.current = false;
     try {
-      const res = await fetch(`/api/analyze/${videoId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shots: [edit] }),
+      if (framing.document) await framing.flush();
+      // Refresh the revision after flushing framing and other panel saves.
+      const latestRes = await fetch(`/api/analyze/${videoId}/timeline`);
+      const latest: TimelineData = await latestRes.json();
+      if (!latestRes.ok) throw new Error("Cannot load the current edit");
+      if (latest.analysis.shotsEditedAt !== analysis?.shotsEditedAt) throw new Error("The timeline changed elsewhere. Reload before editing clips.");
+      const res = await fetch(`/api/analyze/${videoId}/timeline`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: latest.version, operation }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Re-timing the shot failed");
-      setAnalysis(data);
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Re-timing the shot failed");
-    } finally {
-      setRetiming(false);
-    }
+      if (!res.ok) throw new Error(data.error || "Cannot save clip edit");
+      const saved = data as TimelineData;
+      setTimelineData(saved); setAnalysis(saved.analysis); setProject(saved.project);
+      setRecs(saved.sidecars.recommendations); setGeneration(saved.sidecars.generation);
+      setEditNotes(saved.sidecars["edit-notes"]?.notes ?? {});
+      setTextOverlays(saved.sidecars["text-overlays"]); setBrollTrack(saved.sidecars.broll);
+      framing.replace(saved.sidecars.framing);
+      setBrollSelected(null); setFrameTarget(null); setPreviewClip(null); setNoteShot(null);
+      const index = operation.type === "move" ? operation.to : Math.min(selectedShot, saved.analysis.shots.length - 1);
+      setSelectedShot(index); setPlayheadTime(saved.analysis.shots[index].start_time);
+      if (videoRef.current) videoRef.current.currentTime = (saved.analysis.shots[index].source_start ?? saved.analysis.shots[index].start_time) - (saved.sources[index]?.min ?? 0);
+      setTrimBeat(null);
+      return true;
+    } catch (e) { setTimelineError(e instanceof Error ? e.message : "Cannot save clip edit"); return false; }
+    finally { timelineSaving.current = false; setRetiming(false); }
+  };
+  const patchShotTimes = (edit: RetimeEdit) => {
+    const s = analysis?.shots[edit.index];
+    if (!s) return;
+    void editClips({ type: "trim", index: edit.index, start: edit.source_start ?? s.source_start ?? s.start_time, end: edit.source_end ?? s.source_end ?? s.end_time });
+  };
+  const openClipTrim = () => {
+    const s = analysis?.shots[selectedShot];
+    const source = timelineData?.sources[selectedShot];
+    if (!s || !source) return;
+    const start = s.source_start ?? s.start_time;
+    const end = s.source_end ?? s.end_time;
+    const words = !s.source_clip ? wordsForShot(timelineData!.words, { ...s, source_start: start, source_end: end }) : [];
+    setTrimBeat({ start, end, start_word: words[0]?.i ?? null, end_word: words[words.length - 1]?.i ?? null,
+      text: s.spoken_text, section: "main", on_screen_text: s.on_screen_text, show: "source", broll_hint: null,
+      ...(s.source_clip ? { source: { filename: s.source_clip, offset: source.min } } : {}) });
   };
 
   // Pull a dragged footage time onto the nearest word boundary (the same
   // lead/tail the storyboard cut uses) and flag mid-sentence landings
   const snapToWords = (
-    _index: number,
+    index: number,
     edge: "start" | "end",
     t: number
   ): { time: number; midSentence: boolean } | null => {
-    if (!masterSegs?.words.length) return null;
+    if (!masterSegs?.words.length || analysis?.shots[index]?.source_clip) return null;
     const { words, sentences } = masterSegs;
     if (edge === "end") {
       let w = -1;
@@ -1128,10 +1171,14 @@ function VideoViewerContent() {
   const seekTo = (seconds: number, _source?: unknown, request?: number) => {
     const video = videoRef.current;
     if (!video) return;
-    if (masterBacked) {
+    if (sourceBacked) {
       const idx = beatMap.findIndex((b) => seconds >= b.start && seconds < b.end);
       if (idx !== -1) setSelectedShot(idx);
-      video.currentTime = shortToFootageTime(beatMap, seconds);
+      const sourceTime = shortToFootageTime(beatMap, seconds);
+      if (idx >= 0 && timelineData?.sources[idx]?.url !== selectedSourceUrl) {
+        pendingSourceSeek.current = sourceTime; resumeSource.current = true;
+      }
+      video.currentTime = sourceTime;
     } else {
       video.currentTime = seconds;
     }
@@ -1242,8 +1289,11 @@ function VideoViewerContent() {
     const s = analysis.shots.find(s => time >= s.start_time && time < s.end_time) ?? shot;
     if (!s) return;
     setSelectedShot(s.index); setPlayheadTime(time);
-    if (videoRef.current) videoRef.current.currentTime = masterBacked
-      ? (s.source_start ?? s.start_time) + time - s.start_time : time;
+    const sourceTime = sourceBacked ? (s.source_start ?? s.start_time) - sourceOffset(s.index) + time - s.start_time : time;
+    if (timelineData?.sources[s.index]?.url !== selectedSourceUrl) {
+      pendingSourceSeek.current = sourceTime; resumeSource.current = false;
+    }
+    if (videoRef.current) videoRef.current.currentTime = sourceTime;
   };
   // Cutdown beats map 1:1 to shots, so a shot's section is its beat's
   const sectionForShot = (index: number) =>
@@ -1283,16 +1333,15 @@ function VideoViewerContent() {
   const shotThumb = (s: AnalysisShot) =>
     analysis?.shotsEditedAt ? `${s.screenshot}?v=${encodeURIComponent(analysis.shotsEditedAt)}` : s.screenshot;
 
-  // Draggable shot boundaries: footage ranges for cutdowns, split points
-  // for everything else
+  // Draggable clip boundaries share the numeric and transcript edit path.
   const timelineResize: TimelineResize | null =
     videoId && analysis
       ? {
-          mode: project?.kind === "cutdown" ? "source" : "split",
-          footageMax: masterBacked && masterDuration ? masterDuration : undefined,
-          busy: retiming,
+          mode: "source",
+          boundsFor: (index) => timelineData?.sources[index] ?? null,
+          busy: retiming || !timelineData || timelineData.sources.some(s => !s) || rendering || matching || !!brollBusy,
           onCommit: patchShotTimes,
-          snap: masterBacked && masterSegs?.words.length ? snapToWords : undefined,
+          snap: sourceBacked && masterSegs?.words.length ? snapToWords : undefined,
         }
       : null;
   // ---- B-roll track: resolve anchors to seconds, and the edit handlers ---
@@ -1454,13 +1503,13 @@ function VideoViewerContent() {
               (brollTrack?.segments ?? []).map((s) => (s.status === "suggested" && s.clip ? { ...s, status: "placed" } : s))
             ),
           wordsForShot:
-            masterBacked && masterWords
+            sourceBacked && masterWords
               ? (i) => {
                   const shot = brollShots.find((s) => s.index === i);
                   return shot ? wordsForShot(masterWords, shot) : [];
                 }
               : undefined,
-          onPhrase: masterBacked && masterWords ? brollCreateFromWords : undefined,
+          onPhrase: sourceBacked && masterWords ? brollCreateFromWords : undefined,
           onPlaceRec: brollPlaceRec,
         }
       : null;
@@ -1944,21 +1993,13 @@ function VideoViewerContent() {
 
 
   return (
-    <div className="downloads-layout flex flex-col items-center min-h-screen p-4 bg-background text-foreground">
+    <div className={`downloads-layout flex flex-col items-center min-h-screen p-4 bg-background text-foreground ${analysis ? styles.workspace : ""}`}>
       <div
-        className={`flex flex-col gap-6 w-full ${analysis ? "" : "max-w-sm"}`}
+        className={`flex flex-col gap-6 w-full ${analysis ? styles.content : "max-w-sm"}`}
       >
-        {/* Title + tab strip span the player and the panel */}
-        {analysis && (
-          <div className="flex flex-col gap-3 -mb-2">
-            {titleBlock}
-            {tabBar}
-          </div>
-        )}
-
         {/* Ribbon 1: video player + the active tab's panel */}
-        <div className={analysis ? "grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]" : "flex flex-col gap-4"}>
-          <div className="mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0">
+        <div className={analysis ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
+          <div className={`${styles.player} mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0`}>
             <div className={shot && (panelTab === "video" || panelTab === "shots" || panelTab === "clips") ? "hidden" : "rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center"}>
               {playbackError ? (
                 <div className="p-6 text-center">
@@ -1984,9 +2025,10 @@ function VideoViewerContent() {
                     onError={() => setPlaybackError(true)}
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={(e) => {
-                      if (masterBacked) {
-                        setMasterDuration(e.currentTarget.duration);
-                        e.currentTarget.currentTime = playerTimeFor(selectedShot);
+                      if (sourceBacked) {
+                        e.currentTarget.currentTime = pendingSourceSeek.current ?? playerTimeFor(selectedShot);
+                        pendingSourceSeek.current = null;
+                        if (resumeSource.current) { resumeSource.current = false; void playMedia(e.currentTarget).catch(() => {}); }
                       }
                     }}
                   >
@@ -2002,12 +2044,18 @@ function VideoViewerContent() {
                 onTarget={setFrameTarget} onSeek={seekPreview}
                 getTime={() => {
                   const time = videoRef.current?.currentTime ?? 0;
-                  return masterBacked ? shot.start_time + time - (shot.source_start ?? shot.start_time) : time;
+                  return sourceBacked ? shot.start_time + time - (shot.source_start ?? shot.start_time) + sourceOffset(shot.index) : time;
                 }} />
             )}
           </div>
 
-          <div className="flex flex-col gap-3 min-w-0">
+          <section aria-label="Editing panel" tabIndex={analysis ? 0 : undefined} className={`flex flex-col gap-3 min-w-0 ${analysis ? styles.panel : ""}`}>
+            {analysis && (
+              <div className="flex shrink-0 flex-col gap-3">
+                {titleBlock}
+                {tabBar}
+              </div>
+            )}
             {!analysis && (
               <>
                 {titleBlock}
@@ -2016,7 +2064,7 @@ function VideoViewerContent() {
             )}
 
             {analysis && (
-              <div className="flex flex-col gap-3 min-w-0">
+              <div className="flex shrink-0 flex-col gap-3 min-w-0">
                 {panelTab === "video" && (
                   <section aria-label="Video editing" className="flex w-full max-w-lg flex-col gap-4">
                     <h2 className="text-sm font-semibold">Frame &amp; Layers</h2>
@@ -2995,88 +3043,109 @@ function VideoViewerContent() {
                 )}
               </div>
             )}
-          </div>
+          </section>
         </div>
 
         {/* Editing-style timeline: shot columns sized by duration, with
             thumbnail / time / description tracks connected by timestamps */}
         {analysis && shot && (
-          <div className="flex flex-col gap-3">
-            <h2 className="text-sm font-bold text-foreground uppercase tracking-wide">
-              Timeline
-            </h2>
-            <ShotTimeline
-              shots={analysis.shots.map((s) => ({
-                ...s,
-                screenshot: shotThumb(s),
-                title: s.on_screen_text || s.description,
-              }))}
-              selectedShot={selectedShot}
-              playheadTime={playheadTime}
-              timelineRef={timelineRef}
-              pxPerSec={PX_PER_SEC}
-              sectionFor={(i) => {
-                const section = sectionForShot(i);
-                return section ? SECTION_BADGES[section] : null;
-              }}
-              onSelectShot={selectShot}
-              confidenceStyles={CONFIDENCE_STYLES}
-              recs={
-                recs
-                  ? {
-                      byShot: recsByShot,
-                      selectedByShot,
-                      keepSourceByShot,
-                      gapForShot,
-                      thumbSrc,
-                      sourceBadgeClass: CLIP_SOURCE_BADGES.source.className,
-                      onGenerate: (i) => {
-                        selectShot(i, false);
-                        setPanelTab("clips");
-                      },
-                      onPreview: (i, r) => {
-                        selectShot(i, false);
-                        setPanelTab("clips");
-                        setPreviewClip({
-                          filename: r.filename,
-                          start: r.trim_start ?? null,
-                          end: r.trim_end ?? null,
-                        });
-                      },
-                    }
-                  : null
-              }
-              resize={timelineResize}
-              broll={timelineBroll}
-            />
-            {timelineResize && (
-              <p className="text-[10px] text-muted-foreground">
-                {timelineResize.mode === "source"
-                  ? "Drag a line between shots to change where that shot ends in the footage (Alt-drag: where the next one starts). The target length is a goal — cuts snap to words and flag mid-sentence."
-                  : "Drag a line between shots to move the cut. The video's length doesn't change."}
-                {retiming ? " · saving…" : ""}
-              </p>
-            )}
+          <section aria-labelledby="editor-timeline-heading" className={`${styles.timeline} flex flex-col gap-3`}>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <h2 id="editor-timeline-heading" className="text-sm font-bold uppercase tracking-wide">Timeline</h2>
+              <span className="text-xs text-muted-foreground">Clip {selectedShot + 1} · {(shot.end_time - shot.start_time).toFixed(2)}s · Total {analysis.shots[analysis.shots.length - 1].end_time.toFixed(2)}s</span>
+              <fieldset disabled={!timelineData || timelineData.sources.some(s => !s) || retiming || rendering || matching || textSaving || noteSaving || !!brollBusy || framing.status === "Saving"} className="ml-auto flex flex-wrap items-center gap-1 disabled:opacity-50">
+                <button onClick={openClipTrim} title="Adjust length" className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted"><Scissors className="size-3" /> Adjust length</button>
+                <button disabled={selectedShot === 0} onClick={() => void editClips({ type: "move", index: selectedShot, to: selectedShot - 1 })} aria-label="Move clip left" title="Move clip left" className="rounded p-2 hover:bg-muted disabled:opacity-30"><ArrowLeft className="size-3" /></button>
+                <button disabled={selectedShot === analysis.shots.length - 1} onClick={() => void editClips({ type: "move", index: selectedShot, to: selectedShot + 1 })} aria-label="Move clip right" title="Move clip right" className="rounded p-2 hover:bg-muted disabled:opacity-30"><ArrowRight className="size-3" /></button>
+                <button disabled={analysis.shots.length === 1} onClick={() => void editClips({ type: "remove", index: selectedShot })} aria-label="Remove clip" title="Remove clip" className="rounded p-2 hover:bg-muted hover:text-red-400 disabled:opacity-30"><Trash2 className="size-3" /></button>
+                <button disabled={!timelineData?.canUndo} onClick={() => void editClips({ type: "undo" })} aria-label="Undo clip edit" title="Undo clip edit" className="rounded p-2 hover:bg-muted disabled:opacity-30"><Undo2 className="size-3" /></button>
+                <button disabled={!timelineData?.canRedo} onClick={() => void editClips({ type: "redo" })} aria-label="Redo clip edit" title="Redo clip edit" className="rounded p-2 hover:bg-muted disabled:opacity-30"><Redo2 className="size-3" /></button>
+              </fieldset>
+              <span role="status" className="text-xs text-muted-foreground">{retiming ? "Saving…" : ""}</span>
+            </div>
+            {timelineError && <p role="alert" className="text-xs text-red-400">{timelineError}</p>}
+            {trimBeat && timelineData?.sources[selectedShot] && <BeatTrimDialog open beat={trimBeat} index={selectedShot}
+              words={timelineData.words} sentences={timelineData.sentences}
+              sourceDuration={timelineData.sources[selectedShot]!.max - timelineData.sources[selectedShot]!.min}
+              error={timelineError} busy={retiming} onClose={() => { if (!retiming) setTrimBeat(null); }}
+              onApply={next => { void editClips({ type: "trim", index: selectedShot, start: next.start, end: next.end }); }}
+              onSeek={seconds => { const video = videoRef.current; if (video) { video.currentTime = seconds - sourceOffset(selectedShot); void playMedia(video).catch(() => {}); } }} />}
+            <div aria-label="Timeline tracks and transcript" tabIndex={0} className={styles.timelineContent}>
+              <ShotTimeline
+                shots={analysis.shots.map((s) => ({
+                  ...s,
+                  source_start: s.source_start ?? s.start_time,
+                  source_end: s.source_end ?? s.end_time,
+                  screenshot: shotThumb(s),
+                  title: s.on_screen_text || s.description,
+                }))}
+                selectedShot={selectedShot}
+                playheadTime={playheadTime}
+                timelineRef={timelineRef}
+                pxPerSec={PX_PER_SEC}
+                sectionFor={(i) => {
+                  const section = sectionForShot(i);
+                  return section ? SECTION_BADGES[section] : null;
+                }}
+                onSelectShot={selectShot}
+                confidenceStyles={CONFIDENCE_STYLES}
+                recs={
+                  recs
+                    ? {
+                        byShot: recsByShot,
+                        selectedByShot,
+                        keepSourceByShot,
+                        gapForShot,
+                        thumbSrc,
+                        sourceBadgeClass: CLIP_SOURCE_BADGES.source.className,
+                        onGenerate: (i) => {
+                          selectShot(i, false);
+                          setPanelTab("clips");
+                        },
+                        onPreview: (i, r) => {
+                          selectShot(i, false);
+                          setPanelTab("clips");
+                          setPreviewClip({
+                            filename: r.filename,
+                            start: r.trim_start ?? null,
+                            end: r.trim_end ?? null,
+                          });
+                        },
+                      }
+                    : null
+                }
+                resize={timelineResize}
+                broll={timelineBroll}
+              />
+              {timelineResize && (
+                <p className="mt-3 text-[10px] text-muted-foreground">
+                  {timelineResize.mode === "source"
+                    ? "Drag a line between shots to change where that shot ends in the footage (Alt-drag: where the next one starts). Use Adjust length for exact timing or transcript cuts."
+                    : "Drag a line between shots to move the cut. The video's length doesn't change."}
+                  {retiming ? " · saving…" : ""}
+                </p>
+              )}
 
-            {analysis.full_transcript && (
-              <div className="rounded-lg border border-border">
-                <button
-                  onClick={() => setTranscriptOpen((v) => !v)}
-                  className="w-full px-4 py-2 text-left text-sm font-semibold text-foreground flex justify-between items-center"
-                >
-                  Full transcript
-                  <span className="text-muted-foreground">
-                    {transcriptOpen ? "▾" : "▸"}
-                  </span>
-                </button>
-                {transcriptOpen && (
-                  <p className="px-4 pb-3 text-sm text-muted-foreground whitespace-pre-wrap">
-                    {analysis.full_transcript}
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
+              {analysis.full_transcript && (
+                <div className="mt-3 rounded-lg border border-border">
+                  <button
+                    onClick={() => setTranscriptOpen((v) => !v)}
+                    className="w-full px-4 py-2 text-left text-sm font-semibold text-foreground flex justify-between items-center"
+                  >
+                    Full transcript
+                    <span className="text-muted-foreground">
+                      {transcriptOpen ? "▾" : "▸"}
+                    </span>
+                  </button>
+                  {transcriptOpen && (
+                    <p className="px-4 pb-3 text-sm text-muted-foreground whitespace-pre-wrap">
+                      {analysis.full_transcript}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
         )}
       </div>
       <ClipLibraryModal

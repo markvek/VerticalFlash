@@ -173,6 +173,7 @@ export async function POST(
       );
 
       for (const kind of SIDECAR_KINDS) {
+        if (kind === "timeline-history") continue; // A fork starts its own undo history.
         await copyJsonRewritten(
           join(ANALYSIS_DIR, `${srcId}.${kind}.json`),
           join(ANALYSIS_DIR, `${newId}.${kind}.json`),
