@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Crop, Crosshair, LocateFixed, Move, Pause, Play, Redo2, RotateCcw, Undo2 } from "lucide-react";
-import { clamp, DEFAULT_FRAMING, DEFAULT_LAYER, frameRect, withFrameCenter, type Framing, type PreviewSource } from "@/lib/framing-schema";
+import { clamp, DEFAULT_FRAMING, DEFAULT_LAYER, frameRect, MAX_FRAME_ZOOM, MIN_FRAME_ZOOM, withFrameCenter, type Framing, type PreviewSource } from "@/lib/framing-schema";
 import type { useFraming } from "./useFraming";
 import { PositionInput } from "./PositionInput";
 
@@ -241,7 +241,7 @@ export function FramingEditor(props: Props) {
             onClick={() => { selectEndpoint(endpoint); changeCenter(WIDTH / 2, HEIGHT / 2); }}><LocateFixed size={16} /></button>
         </fieldset>
         <label className="flex items-center gap-2 text-xs">Zoom
-          <input aria-label="Zoom" className="min-w-0 flex-1" type="range" min={1} max={4} step={0.01}
+          <input aria-label="Zoom" className="min-w-0 flex-1" type="range" min={MIN_FRAME_ZOOM} max={MAX_FRAME_ZOOM} step={0.01}
             value={frame[frame.motion === "static" ? "start" : endpoint].zoom}
             disabled={!dimensionsReady}
             onPointerDown={() => { state.begin(); selectEndpoint(endpoint); }} onPointerUp={controlEnd} onPointerCancel={controlEnd} onBlur={controlEnd} onKeyUp={controlEnd}
