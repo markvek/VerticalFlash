@@ -16,6 +16,9 @@ import { ANALYSIS_DIR, analysisPath, sidecarPath } from "./paths";
 import { readAttachedFootage, resolveStoryboardBeat } from "./storyboard-footage";
 import { findDownloadFile } from "./download-files";
 import { findLibraryFile } from "./library-store";
+import { handoffText, handoffBroll, type ReviewedHandoff } from "./storyboard-handoff";
+import { writeBrollTrack } from "./broll-store";
+import { SIDECAR_KINDS } from "./sidecars";
 
 // Accepting a storyboard: the beats are trimmed out of the master (video +
 // audio) and joined into a new editing/ project whose source IS the
@@ -35,6 +38,7 @@ export interface BuildCutdownInput {
   masterMeta: MasterProjectMeta;
   segments: MasterSegments;
   storyboard: Storyboard;
+  handoff?: ReviewedHandoff;
 }
 
 export interface BuildCutdownResult {
@@ -42,6 +46,7 @@ export interface BuildCutdownResult {
   videoId: string;
   displayName: string;
   duration: number;
+  warnings?: string[];
 }
 
 // The editor's analysis, written straight from the beats
@@ -250,8 +255,8 @@ export async function buildCutdown(input: BuildCutdownInput): Promise<BuildCutdo
           start: Math.round(start * 1000) / 1000,
           end: Math.round(Math.max(end, start + 0.05) * 1000) / 1000,
           text: beat.text,
-          on_screen_text: beat.on_screen_text,
-          show: beat.show,
+          on_screen_text: input.handoff ? (input.handoff.options.add_text ? input.handoff.review?.text.find(t => t.beat_index === beats.length)?.text ?? "" : "") : beat.on_screen_text,
+          show: input.handoff ? "source" : beat.show,
         });
       }
       cursor += segDuration;
@@ -285,7 +290,7 @@ export async function buildCutdown(input: BuildCutdownInput): Promise<BuildCutdo
     };
     await fs.writeFile(`${videoPath}.metadata.json`, JSON.stringify(meta, null, 2));
 
-    await writeCutdownArtifacts(videoPath, videoId, meta, duration);
+    const analysis = await writeCutdownArtifacts(videoPath, videoId, meta, duration);
     await fs.writeFile(
       sidecarPath(videoId, "recommendations"),
       JSON.stringify(recommendationsFromCutdown(videoId, meta), null, 2)
@@ -296,12 +301,22 @@ export async function buildCutdown(input: BuildCutdownInput): Promise<BuildCutdo
     if (Object.keys(notes).length) {
       await fs.writeFile(sidecarPath(videoId, "edit-notes"), JSON.stringify({ videoId, notes, updatedAt: now }, null, 2));
     }
+    const warnings: string[] = [];
+    if (input.handoff) {
+      await fs.writeFile(sidecarPath(videoId, "text-overlays"), JSON.stringify(handoffText(analysis, input.handoff), null, 2));
+      const excluded = new Set([...input.masterMeta.sourceClips.map(c => c.filename), ...storyboard.beats.flatMap(b => b.source ? [b.source.filename] : [])]);
+      const broll = await handoffBroll(analysis, input.handoff, excluded);
+      await writeBrollTrack({ videoId, updatedAt: now, segments: broll.segments });
+      warnings.push(...broll.warnings);
+      await fs.writeFile(sidecarPath(videoId, "virality"), JSON.stringify({ review: input.handoff.review, options: input.handoff.options, warnings }, null, 2));
+    }
     await setDisplayName(filename, displayName);
-
-    return { filename, videoId, displayName, duration };
+    return { filename, videoId, displayName, duration, warnings };
   } catch (error) {
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(`${videoPath}.metadata.json`).catch(() => {});
+    await Promise.all([analysisPath(videoId), ...SIDECAR_KINDS.map(kind => sidecarPath(videoId, kind))].map(path => fs.unlink(path).catch(() => {})));
+    await fs.rm(join(ANALYSIS_DIR, videoId), { recursive: true, force: true }).catch(() => {});
     throw error;
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});

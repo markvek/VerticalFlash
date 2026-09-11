@@ -12,6 +12,7 @@ export const SIDECAR_KINDS = [
   "text-overlays",
   "captions",
   "variations",
+  "virality",
   "project",
   // Storyboard flow (master projects): the timed transcript segments and
   // the generated storyboards

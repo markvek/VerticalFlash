@@ -100,6 +100,15 @@ async function migrateLegacy(videoId: string): Promise<void> {
   }
 }
 
+// Read an idea with its own generation brief/model, not the newest idea's.
+export async function readSavedStoryboard(videoId: string, storyboardId: string): Promise<MasterStoryboards | null> {
+  const saved = await readDocument(ideaPath(videoId, storyboardId));
+  if (saved) return saved;
+  const legacy = await readDocument(sidecarPath(videoId, "storyboards"));
+  const idea = legacy?.storyboards.find(s => s.id === storyboardId);
+  return legacy && idea ? singleIdea(legacy, idea) : null;
+}
+
 // Generation adds new ideas. It never replaces an earlier generation.
 export async function writeStoryboards(doc: MasterStoryboards): Promise<MasterStoryboards> {
   return withLock(doc.videoId, async () => {

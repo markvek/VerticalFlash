@@ -1,6 +1,7 @@
 export const AGENT_KIT_VERSION = "0.1.0";
 
 export const AGENT_GUIDES = [
+  { file: "virality-review.md", title: "Hook & virality review", description: "Assess storyboard hooks and plan optional text and B-roll for editing.", path: "verticalflash-video/references/virality-review.md" },
   { file: "SKILL.md", title: "Video workflow skill", description: "The entry point for your agent: how to use VerticalFlash and move between creative stages.", path: "verticalflash-video/SKILL.md" },
   { file: "creative-brief.md", title: "Creative direction", description: "Work out the audience, angle, tone, source footage, and how involved you want to be.", path: "verticalflash-video/references/creative-brief.md" },
   { file: "storyboarding.md", title: "Storyboarding", description: "Compare hooks, revise beats, and turn the chosen storyboard into an editing project.", path: "verticalflash-video/references/storyboarding.md" },

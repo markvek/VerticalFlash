@@ -8,6 +8,7 @@ import { flushSync } from "react-dom";
 import { Dialog } from "radix-ui";
 import { ChevronDown, ChevronRight, Loader2, Play, Plus, Square, X } from "lucide-react";
 import { StoryboardBeatCard } from "./StoryboardBeatCard";
+import { useStoryboardReviews } from "./ViralityReviewPanel";
 import { beginMediaPlayback, isCurrentMediaPlayback, subscribeMediaPlayback } from "@/lib/media-playback";
 import type {
   Beat,
@@ -42,6 +43,7 @@ export interface StoryboardPanelProps {
   previewMedia?: ReactNode;
   footagePanel?: ReactNode;
   refreshKey?: number;
+  onOpenReview?: (storyboardId: string) => void;
 }
 
 const ROLE_STYLES: Record<SegmentRole, string> = {
@@ -112,7 +114,7 @@ function beatMatchesSegment(beat: Beat, segment: Segment): boolean {
   );
 }
 
-export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
+export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
   const [model, setModel] = useState("");
   const [segments, setSegments] = useState<MasterSegments | null>(null);
   const [storyboards, setStoryboards] = useState<MasterStoryboards | null>(null);
@@ -137,6 +139,10 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
   const [brief, setBrief] = useState("");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [addText, setAddText] = useState(false);
+  const [addBroll, setAddBroll] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const reviews = useStoryboardReviews(videoId, storyboards?.storyboards.map(s => `${s.id}:${s.revision ?? 1}`).join(",") ?? "");
 
   const [accepting, setAccepting] = useState<string | null>(null);
   const [acceptedNow, setAcceptedNow] = useState<
@@ -253,6 +259,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       null
     );
   }, [activeStoryboardId, storyboards]);
+  const activeReview = reviews.items.find(i => i.storyboard.id === activeStoryboard?.id && (i.storyboard.revision ?? 1) === (activeStoryboard?.revision ?? 1))?.review;
 
   const saveStoryboard = async (storyboard: Storyboard): Promise<Storyboard> => {
     setSaving(true);
@@ -410,6 +417,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       return;
     }
     setGenerating(true);
+    setNotice(null);
     setError(null);
     stopPreview();
     try {
@@ -424,6 +432,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       setActiveStoryboardId(data.storyboards?.[0]?.id ?? null);
       setAcceptedNow({});
       setControlsOpen(false);
+      if (data.reviewWarnings?.length) setNotice(`Ideas saved. Some reviews need a retry: ${data.reviewWarnings.join("; ")}`);
       window.dispatchEvent(new Event("downloads-changed"));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Storyboard generation failed");
@@ -435,12 +444,13 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
   const accept = async (sb: Storyboard) => {
     setAccepting(sb.id);
     setError(null);
+    setNotice(null);
     try {
       const saved = await saveStoryboard(sb);
       const res = await fetch(`/api/master/${videoId}/storyboards/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storyboard_id: saved.id }),
+        body: JSON.stringify({ storyboard_id: saved.id, revision: saved.revision ?? 1, add_text: addText && !!activeReview?.text.length, add_broll: addBroll && !!activeReview?.broll.length }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Failed (HTTP ${res.status})`);
@@ -449,6 +459,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
         [saved.id]: { filename: data.filename, displayName: data.displayName },
       }));
       window.dispatchEvent(new Event("downloads-changed"));
+      setNotice(data.warnings?.length ? data.warnings.join(" ") : "Editing project created. Your selected additions are ready to edit.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not cut the short");
     } finally {
@@ -625,7 +636,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
               className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {generating
-                ? "Writing storyboards with Gemini…"
+                ? "Creating storyboards and reviewing hooks…"
                 : storyboards
                   ? "Generate more storyboards"
                   : "Generate storyboards"}
@@ -724,6 +735,17 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
               <Plus className="size-7" /><span>Add a storyboard segment</span>
             </button>
           </div>
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <span>{reviews.loading ? "Loading hook review…" : activeReview ? `Hook ${activeReview.assessments.hook.score}/5 · Review ready` : "Review needed for this revision"}</span>
+              {onOpenReview ? <button className="underline" onClick={() => onOpenReview(activeStoryboard.id)}>Virality Review</button> : <a className="underline" href={`/editing/${encodeURIComponent(filename)}?view=virality&storyboard=${encodeURIComponent(activeStoryboard.id)}`}>Virality Review</a>}
+              {!activeReview && !reviews.loading && <button className="underline disabled:opacity-50" disabled={!!reviews.reviewing || saving || !!accepting} onClick={() => reviews.review(activeStoryboard.id)}>{reviews.reviewing ? "Reviewing…" : "Review storyboard"}</button>}
+            </div>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={addText && !!activeReview?.text.length} disabled={!activeReview?.text.length || saving || !!accepting} onChange={e => setAddText(e.target.checked)} />Add recommended on-screen text{activeReview ? ` (${activeReview.text.length})` : ""}</label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={addBroll && !!activeReview?.broll.length} disabled={!activeReview?.broll.length || saving || !!accepting} onChange={e => setAddBroll(e.target.checked)} />Add recommended B-roll{activeReview ? ` (${activeReview.broll.length})` : ""}</label>
+            <p className="text-[11px] text-muted-foreground">Optional additions based on this storyboard review. Text is separate from speech captions. Strong B-roll matches are placed over your original audio; unmatched windows stay as suggestions.</p>
+            {reviews.error && <p role="alert" className="text-xs text-red-400">{reviews.error}</p>}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={() => previewing ? stopPreview() : preview(activeStoryboard)} disabled={!onSeek}
               className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs font-semibold disabled:opacity-50">
@@ -737,6 +759,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
           </div>
         </div>}
         {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
+        {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
       </section>
 
       <section className="min-w-0 space-y-2 rounded-lg border border-border p-3 lg:col-span-2">

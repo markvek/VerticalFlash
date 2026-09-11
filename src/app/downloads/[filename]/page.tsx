@@ -7,7 +7,8 @@ import { useFraming } from "@/components/form/useFraming";
 import type { FramingDocument } from "@/lib/framing-schema";
 
 import { useParams, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { ViralityReviewPanel } from "@/components/form/ViralityReviewPanel";
 import {
   GEMINI_PRICE_IN_PER_M,
   GEMINI_PRICE_OUT_PER_M,
@@ -372,9 +373,18 @@ function VideoViewerContent() {
   const [previewClip, setPreviewClip] = useState<ClipPreview | null>(null);
   const [allClipsOpen, setAllClipsOpen] = useState(false);
   const [trimmingShot, setTrimmingShot] = useState<number | null>(null);
-  const [panelTab, setPanelTab] = useState<
-    "video" | "shots" | "clips" | "storyboards" | "render" | "captions"
-  >("video");
+  type EditorView = "video" | "shots" | "clips" | "storyboards" | "render" | "captions" | "virality";
+  const [panelTab, setPanelTabState] = useState<EditorView>("video");
+  const setPanelTab = useCallback((tab: EditorView) => {
+    setPanelTabState(tab);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", tab);
+    window.history.replaceState(null, "", url.toString());
+  }, []);
+  useEffect(() => {
+    const view = searchParams.get("view");
+    if (view && ["video", "shots", "clips", "storyboards", "render", "captions", "virality"].includes(view)) setPanelTabState(view as EditorView);
+  }, [searchParams]);
   // Master projects open their saved storyboards once analysis has loaded.
   const tabParamApplied = useRef(false);
   const [loopShot, setLoopShot] = useState(false);
@@ -528,7 +538,7 @@ function VideoViewerContent() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setPanelTab]);
 
   const handleTiktokConnect = () => {
     const returnTo = window.location.pathname;
@@ -713,8 +723,8 @@ function VideoViewerContent() {
     if (tabParamApplied.current) return;
     if (!analysis || project?.kind !== "master") return;
     tabParamApplied.current = true;
-    setPanelTab("storyboards");
-  }, [analysis, project, searchParams]);
+    if (!searchParams.get("view")) setPanelTab("storyboards");
+  }, [analysis, project, searchParams, setPanelTab]);
 
   // Space toggles play/pause anywhere on the page (except while an
   // interactive element is focused — buttons/inputs keep native behavior)
@@ -2043,6 +2053,9 @@ function VideoViewerContent() {
           Storyboards
         </button>
       )}
+      <button onClick={() => setPanelTab("virality")} className={tabClass("virality")}>
+        Virality Review
+      </button>
       <button onClick={() => setPanelTab("render")} className={tabClass("render")}>
         Render Details
       </button>
@@ -2635,6 +2648,7 @@ function VideoViewerContent() {
                     </div>
                   ))}
 
+                {panelTab === "virality" && videoId && <ViralityReviewPanel videoId={videoId} storyboardId={searchParams.get("storyboard") ?? undefined} onSeek={project?.kind === "master" ? seekTo : undefined} />}
                 {panelTab === "storyboards" &&
                   project?.kind === "master" &&
                   videoId && (
