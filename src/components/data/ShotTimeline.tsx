@@ -3,8 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import { MIN_SHOT_SECONDS, type RetimeEdit } from "@/lib/shot-retime";
+import { ShotInstructionEditor } from "@/components/form/ShotInstructionEditor";
+import type { ShotOverlay } from "@/lib/text-overlays-schema";
 import { MIN_BROLL_SECONDS } from "@/lib/broll-resolve";
 import type { Word } from "@/lib/segments-schema";
+import { TimelinePlayhead } from "./TimelinePlayhead";
 
 // The editor's timeline: one column per shot, sized by duration, with the
 // frame / B-roll / time / text / notes / tags tracks and (once matched) the
@@ -28,6 +31,7 @@ export interface TimelineShot {
   // One-line summary shown on the shot chip (the on-screen line, or the
   // description when there is none)
   title?: string;
+  sourceName?: string;
 }
 
 export interface TimelineRec {
@@ -84,9 +88,14 @@ export interface TimelineBroll {
 }
 
 export interface ShotTimelineProps {
+  text?: { enabled: boolean; entry: (index: number) => ShotOverlay; label: (index: number) => string; onSelect: (index: number) => void; onMatchSpeech: (index: number, enabled: boolean) => void; busy: boolean };
+  instructions?: { notes: Record<string, string>; drafts?: Record<string, string>; onDraftChange?: (index: number, text: string) => void; busy: boolean; onSave: (index: number, text: string) => Promise<boolean>; onApply?: () => void };
   shots: TimelineShot[];
   selectedShot: number;
   playheadTime: number;
+  onSeek: (time: number) => void;
+  onScrubStart: () => void;
+  onScrubEnd: () => void;
   timelineRef: RefObject<HTMLDivElement | null>;
   pxPerSec: number;
   sectionFor: (index: number) => { label: string; className: string } | null;
@@ -159,6 +168,9 @@ export function ShotTimeline({
   shots,
   selectedShot,
   playheadTime,
+  onSeek,
+  onScrubStart,
+  onScrubEnd,
   timelineRef,
   pxPerSec,
   sectionFor,
@@ -167,7 +179,11 @@ export function ShotTimeline({
   recs,
   resize,
   broll,
+  text,
+  instructions,
 }: ShotTimelineProps) {
+  const TEXT_HEIGHT = 64, BROLL_HEIGHT = broll ? 64 : 0;
+  const VIDEO_TOP = TEXT_HEIGHT + BROLL_HEIGHT;
   const [drag, setDrag] = useState<DragState | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [blockDrag, setBlockDrag] = useState<BlockDrag | null>(null);
@@ -316,19 +332,16 @@ export function ShotTimeline({
 
   // ---- B-roll blocks ---------------------------------------------------
 
-  const shotAt = (t: number) => shots.find((s) => t >= s.start_time && t < s.end_time) ?? shots[shots.length - 1];
-
   const blockRange = (b: TimelineBrollBlock) =>
     blockDrag && blockDrag.id === b.id ? { start: blockDrag.start, end: blockDrag.end } : { start: b.start, end: b.end };
 
   const clampBlock = (id: string, start: number, end: number, part: BlockDrag["part"]) => {
     const block = broll?.blocks.find((b) => b.id === id);
     if (!block) return { start, end };
-    // Stay inside the shot the block belongs to, and off its neighbours
-    const shot = shotAt(block.start);
+    // B-roll may cross main-video cuts, but cannot overwrite its neighbours
     const others = (broll?.blocks ?? []).filter((b) => b.id !== id && b.valid && b.status === "placed");
-    const prevEnd = Math.max(shot.start_time, ...others.filter((b) => b.end <= block.start + 0.01).map((b) => b.end));
-    const nextStart = Math.min(shot.end_time, ...others.filter((b) => b.start >= block.end - 0.01).map((b) => b.start));
+    const prevEnd = Math.max(0, ...others.filter((b) => b.end <= block.start + 0.01).map((b) => b.end));
+    const nextStart = Math.min(totalSeconds, ...others.filter((b) => b.start >= block.end - 0.01).map((b) => b.start));
     const len = end - start;
     if (part === "body") {
       const s = Math.max(prevEnd, Math.min(start, nextStart - len));
@@ -359,6 +372,10 @@ export function ShotTimeline({
       end += delta;
     } else if (state.part === "start") start += delta;
     else end += delta;
+    const boundaries = shots.flatMap(s => [s.start_time, s.end_time]);
+    const snap = (t: number) => boundaries.find(b => Math.abs(b - t) * pxPerSec < 6) ?? t;
+    if (state.part === "body") { const snapped = snap(start); end += snapped - start; start = snapped; }
+    else if (state.part === "start") start = snap(start); else end = snap(end);
     const clamped = clampBlock(state.id, start, end, state.part);
     const next = { ...state, ...clamped, moved: state.moved || Math.abs(delta) > 0.02 };
     blockDragRef.current = next;
@@ -390,7 +407,7 @@ export function ShotTimeline({
     <div className="flex rounded-lg border border-border overflow-hidden">
       {/* Track labels */}
       <div className="flex flex-col shrink-0 bg-muted/40 border-r border-border text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        <div className="h-16 flex items-center px-2">Video</div>
+        <div className="h-16 flex items-center px-2">On-screen</div>
         {broll && (
           <div className="h-16 flex flex-col justify-center px-2 border-t border-border text-violet-500" title="Seconds of the short covered by B-roll">
             <span>B-roll</span>
@@ -408,10 +425,10 @@ export function ShotTimeline({
             )}
           </div>
         )}
+        <div className="h-16 flex items-center px-2">Video</div>
         <div className="h-10 flex items-center px-2 border-y border-border">Time</div>
-        <div className="h-16 flex items-center px-2 border-b border-border">On-screen</div>
         <div className="h-16 flex items-center px-2 border-b border-border">Spoken</div>
-        <div className="h-20 flex items-center px-2">Notes</div>
+        <div className="h-28 flex items-center px-2">AI notes</div>
         <div className="h-14 flex items-center px-2 border-t border-border">Tags</div>
         {recs && (
           <div className="h-20 flex items-center px-2 border-t border-border text-primary">B-roll recs.</div>
@@ -422,10 +439,8 @@ export function ShotTimeline({
       <div ref={timelineRef} className={`relative overflow-x-auto ${drag || blockDrag ? "select-none" : ""}`}>
         <div className="relative" style={{ width: totalWidth }}>
           {/* Playhead */}
-          <div
-            className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none"
-            style={{ left: playheadTime * pxPerSec }}
-          />
+          <TimelinePlayhead time={playheadTime} duration={shots.at(-1)?.end_time ?? 0} pxPerSec={pxPerSec}
+            timelineRef={timelineRef} onSeek={onSeek} onScrubStart={onScrubStart} onScrubEnd={onScrubEnd} />
           {/* What the B-roll covers, marked along the top of the VIDEO track */}
           {broll?.blocks
             .filter((b) => b.valid && b.status === "placed" && b.clip)
@@ -435,7 +450,7 @@ export function ShotTimeline({
                 <div
                   key={`cover-${b.id}`}
                   className="absolute top-0 h-[3px] bg-violet-500 z-10 pointer-events-none"
-                  style={{ left: r.start * pxPerSec, width: (r.end - r.start) * pxPerSec }}
+                  style={{ top: VIDEO_TOP, left: r.start * pxPerSec, width: (r.end - r.start) * pxPerSec }}
                 />
               );
             })}
@@ -451,13 +466,26 @@ export function ShotTimeline({
                   tabIndex={0}
                   onClick={() => onSelectShot(s.index)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") onSelectShot(s.index);
+                    if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onSelectShot(s.index); }
                   }}
                   style={{ width: widthFor(s.index) }}
                   className={`flex flex-col shrink-0 text-left border-l first:border-l-0 border-border transition-colors cursor-pointer ${
                     s.index === selectedShot ? "bg-primary/10" : "hover:bg-muted/40"
                   }`}
                 >
+                  <div className="h-16 w-full border-b border-border p-1" onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
+                    <div style={text?.entry(s.index).include ? { marginLeft: (text.entry(s.index).startOffset ?? 0) * pxPerSec,
+                      width: Math.max(8, (Math.min(durationFor(s.index), text.entry(s.index).endOffset ?? durationFor(s.index)) - (text.entry(s.index).startOffset ?? 0)) * pxPerSec - 8) } : undefined}
+                      className={`flex h-full min-w-0 flex-col justify-center gap-1 rounded border px-2 ${text?.enabled && text.entry(s.index).include ? "border-violet-400/70 bg-violet-500/20" : "border-dashed border-border"}`}>
+                      <button className="truncate text-left text-[11px] font-medium" onClick={() => text?.onSelect(s.index)} title={text?.label(s.index) || "Add on-screen text"}>
+                        <span aria-hidden="true" className="mr-2 font-bold">T</span>{text?.label(s.index) || "Add on-screen text"}
+                      </button>
+                      <label className="flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground"><input aria-label={`Match spoken words for shot ${s.index + 1}`} type="checkbox" disabled={text?.busy}
+                        checked={text?.entry(s.index).matchSpeech ?? false} onChange={e => text?.onMatchSpeech(s.index, e.target.checked)} /><span className="truncate">Match spoken words</span></label>
+                    </div>
+                  </div>
+                  {broll && <div className="h-16 w-full border-b border-border" />}
+                  <div data-main-clip={s.index} className={`flex flex-col rounded-lg ring-1 ring-inset overflow-hidden ${s.index === selectedShot ? "ring-orange-500/70 bg-primary/10" : "ring-border bg-muted/20"}`}>
                   {/* Shot chip (Paper LLW-0): the frame cropped on the
                       left, then time range, section pill, and the shot's
                       line; edge markers echo the draggable boundaries */}
@@ -491,7 +519,7 @@ export function ShotTimeline({
                               )}
                             </div>
                             <p className="text-[10px] leading-[15px] text-muted-foreground truncate">
-                              {s.title || s.on_screen_text || s.description}
+                              {s.title || s.description}{s.sourceName ? ` · ${s.sourceName}` : ""}
                             </p>
                           </div>
                           <div className={`pointer-events-none absolute inset-y-0 left-0 w-1.5 border-l-2 ${style.edge}`} />
@@ -500,9 +528,6 @@ export function ShotTimeline({
                       </div>
                     );
                   })()}
-                  {/* B-roll track spacer: the blocks are drawn once, over
-                      all columns, below */}
-                  {broll && <div className="h-16 w-full border-t border-border" />}
                   <div
                     className={`h-10 w-full px-1 flex flex-col justify-center border-y ${
                       s.index === selectedShot ? "border-primary/50 bg-primary/15" : "border-border bg-muted/30"
@@ -521,11 +546,6 @@ export function ShotTimeline({
                     <span className="text-[9px] font-mono text-muted-foreground leading-tight truncate">
                       +{durationFor(s.index).toFixed(1)}s
                     </span>
-                  </div>
-                  <div className="h-16 w-full px-1 py-1 overflow-hidden border-b border-border">
-                    <p className="text-[9px] leading-tight text-foreground line-clamp-4 break-words italic">
-                      {s.on_screen_text || <span className="text-muted-foreground">—</span>}
-                    </p>
                   </div>
                   <div className="relative h-16 w-full px-1 py-1 overflow-hidden border-b border-border">
                     {selectable ? (
@@ -574,8 +594,10 @@ export function ShotTimeline({
                       </button>
                     )}
                   </div>
-                  <div className="h-20 w-full px-1 py-1 overflow-hidden">
-                    <p className="text-[10px] leading-tight text-foreground line-clamp-5 break-words">{s.description}</p>
+                  <div className="h-28 w-full px-1 py-1 overflow-hidden border-b border-border">
+                    {instructions ? <ShotInstructionEditor index={s.index} draft={instructions.drafts?.[String(s.index)]} onDraftChange={instructions.onDraftChange} note={instructions.notes[String(s.index)] ?? ""} description={s.description}
+                      busy={instructions.busy} onSave={instructions.onSave} onApply={instructions.onApply} />
+                      : <p className="text-[10px] text-muted-foreground">{s.description}</p>}
                   </div>
                   <div className="h-14 w-full px-1 py-1 overflow-hidden border-t border-border">
                     {s.tags?.length ? (
@@ -590,6 +612,7 @@ export function ShotTimeline({
                       <p className="text-[9px] text-muted-foreground">—</p>
                     )}
                   </div>
+                  </div>
                 </div>
               );
             })}
@@ -599,8 +622,8 @@ export function ShotTimeline({
               clicks to start a new segment */}
           {broll && (
             <div
-              className="absolute left-0 right-0 z-10"
-              style={{ top: 64, height: 64 }}
+              className="absolute left-0 right-0"
+              style={{ top: TEXT_HEIGHT, height: BROLL_HEIGHT }}
               onClick={(e) => {
                 if (e.target !== e.currentTarget || broll.busy) return;
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -621,6 +644,8 @@ export function ShotTimeline({
                   <div
                     key={b.id}
                     data-broll-block={b.id}
+                    role="button" tabIndex={0} aria-label={`B-roll: ${b.clip?.filename ?? "choose a clip"}`}
+                    onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); broll.onSelect(b.id, e.currentTarget.getBoundingClientRect()); } }}
                     style={{ left: r.start * pxPerSec, width: Math.max(8, (r.end - r.start) * pxPerSec) }}
                     title={b.valid ? `${b.phrase || b.description || "B-roll"} · ${r.start.toFixed(1)}–${r.end.toFixed(1)}s` : `Not rendered — ${b.reason}`}
                     className={`group absolute top-1.5 h-[52px] rounded-md border overflow-hidden flex items-center gap-1.5 pr-2 ${
@@ -667,13 +692,13 @@ export function ShotTimeline({
                       onPointerDown={(e) => beginBlockDrag(e, b, "start")}
                       onPointerMove={moveBlockDrag}
                       onPointerUp={(e) => endBlockDrag(e, b)}
-                      className="absolute inset-y-0 left-0 w-1.5 cursor-col-resize border-l-2 border-violet-500/80"
+                      className="absolute inset-y-0 left-0 z-40 w-1.5 cursor-col-resize border-l-2 border-violet-500/80"
                     />
                     <div
                       onPointerDown={(e) => beginBlockDrag(e, b, "end")}
                       onPointerMove={moveBlockDrag}
                       onPointerUp={(e) => endBlockDrag(e, b)}
-                      className="absolute inset-y-0 right-0 w-1.5 cursor-col-resize border-r-2 border-violet-500/80"
+                      className="absolute inset-y-0 right-0 z-40 w-1.5 cursor-col-resize border-r-2 border-violet-500/80"
                     />
                     <button
                       onPointerDown={(e) => e.stopPropagation()}
@@ -787,7 +812,8 @@ export function ShotTimeline({
             </div>
           )}
 
-          {/* Drag handles over the boundaries */}
+          {/* Trim grips take priority on the video header; the playhead remains
+              grabbable on the other rows when it sits exactly on a cut. */}
           {handles.map((h) => (
             <div
               key={`${h.index}-${h.edge}`}
@@ -812,8 +838,8 @@ export function ShotTimeline({
               onPointerMove={moveDrag}
               onPointerUp={endDrag}
               onPointerCancel={endDrag}
-              style={{ left: h.x }}
-              className={`group absolute top-0 bottom-0 z-20 w-2 -ml-1 ${resize?.busy ? "cursor-progress" : "cursor-col-resize"}`}
+              style={{ left: h.x, top: VIDEO_TOP, height: 64 }}
+              className={`group absolute z-40 w-2 -ml-1 ${resize?.busy ? "cursor-progress" : "cursor-col-resize"}`}
             >
               <div
                 className={`absolute inset-y-0 left-1/2 -ml-px w-0.5 transition-colors ${

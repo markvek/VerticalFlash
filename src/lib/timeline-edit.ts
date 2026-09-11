@@ -49,6 +49,19 @@ export function remapIndexed<T extends { shot_index: number }>(rows: T[], order:
 }
 export function remapBroll(segments: BrollSegment[], order: number[], before: ClipRange[], after: ClipRange[], words: Word[] = []): BrollSegment[] {
   return segments.flatMap(segment => {
+    if (segment.anchor.kind === "span") {
+      const anchor = segment.anchor;
+      if (anchor.invalidReason) return [segment];
+      const startIndex = order.indexOf(anchor.shot_index);
+      const endIndex = order.indexOf(anchor.end_shot_index);
+      const reason = startIndex < 0 || endIndex < 0 ? "An endpoint shot was removed; adjust this B-roll range" : startIndex > endIndex ? "Endpoint shots were reordered; adjust this B-roll range" : undefined;
+      if (reason) return [{ ...segment, anchor: { ...anchor, invalidReason: reason } }];
+      const startShift = before[anchor.shot_index].source_start - after[startIndex].source_start;
+      const endShift = before[anchor.end_shot_index].source_start - after[endIndex].source_start;
+      const offset = anchor.offset + startShift;
+      return [{ ...segment, clip: segment.clip && offset < 0 ? { ...segment.clip, clip_start: (segment.clip.clip_start ?? 0) - offset } : segment.clip,
+        anchor: { ...anchor, shot_index: startIndex, end_shot_index: endIndex, offset: Math.max(0, offset), end_offset: Math.max(0, anchor.end_offset + endShift) } }];
+    }
     const old = segment.anchor.shot_index;
     const index = order.indexOf(old);
     if (index < 0) return [];

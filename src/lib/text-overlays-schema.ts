@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { sidecarPath } from "./paths";
 
 // Burn engines: "png" (the default) rasterizes each text block to a
 // transparent PNG (rounded TikTok-style pill backgrounds, color emoji — see
@@ -21,6 +20,8 @@ export const TextStyleZ = z.object({
   engine: z.enum(TEXT_ENGINES),
   preset: z.enum(TEXT_STYLE_PRESETS),
   position: z.enum(TEXT_POSITIONS),
+  fontSize: z.number().min(24).max(120).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
 });
 
 export type TextStyle = z.infer<typeof TextStyleZ>;
@@ -31,28 +32,31 @@ export const DEFAULT_TEXT_STYLE: TextStyle = {
   position: "top",
 };
 
-// Per-shot on-screen text overrides written in the Library clips tab. Stored
-// separately from recommendations so a re-match doesn't wipe them (same
-// rationale as edit notes). A shot with no entry falls back to the
-// analysis's detected on_screen_text, included whenever it's non-empty.
+export const TextWordZ = z.object({
+  text: z.string().min(1).max(100),
+  start: z.number().finite().nonnegative(),
+  end: z.number().finite().nonnegative(),
+}).refine(w => w.end > w.start, "Word end must follow its start");
+export type TextWord = z.infer<typeof TextWordZ>;
+
+export const ShotOverlayZ = z.object({
+  text: z.string().max(500),
+  include: z.boolean(),
+  matchSpeech: z.boolean().optional(),
+  // Source timestamps survive shot trimming and reordering.
+  words: z.array(TextWordZ).max(10000).optional(),
+  style: TextStyleZ.partial().optional(),
+  startOffset: z.number().finite().nonnegative().optional(),
+  endOffset: z.number().finite().nonnegative().optional(),
+});
+export type ShotOverlay = z.infer<typeof ShotOverlayZ>;
 export const TextOverlaysZ = z.object({
   videoId: z.string(),
   updatedAt: z.string(),
   style: TextStyleZ,
-  // shot_index (as a string key) -> the user's text + include toggle
-  shots: z.record(
-    z.object({
-      text: z.string(),
-      include: z.boolean(),
-    })
-  ),
+  shots: z.record(ShotOverlayZ),
 });
-
 export type TextOverlays = z.infer<typeof TextOverlaysZ>;
-
-export function textOverlaysPath(videoId: string): string {
-  return sidecarPath(videoId, "text-overlays");
-}
 
 // The fallback rule, shared by the renderer and the UI
 export function resolveShotOverlay(

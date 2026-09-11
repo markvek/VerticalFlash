@@ -1,3 +1,4 @@
+import { projectEditLocks as locks } from "@/lib/project-edit-lock";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { createHash, randomUUID } from "crypto";
@@ -25,7 +26,7 @@ const operation = z.discriminatedUnion("type", [
   z.object({ type: z.literal("redo") }),
 ]);
 const bodySchema = z.object({ version: z.string(), operation });
-const locks = new Map<string, Promise<unknown>>();
+
 const read = async (path: string) => fs.readFile(path, "utf8").catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return null; throw e; });
 const hash = (snapshot: Snapshot) => createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
 const json = (value: unknown) => JSON.stringify(value, null, 2);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type RefObject } from "react";
+import type { TextCue } from "@/lib/text-cues";
 import { createPortal } from "react-dom";
 import { Crop, Crosshair, LocateFixed, Move, Pause, Play, Redo2, RotateCcw, Undo2 } from "lucide-react";
 import { clamp, DEFAULT_FRAMING, DEFAULT_LAYER, frameRect, MAX_FRAME_ZOOM, MIN_FRAME_ZOOM, withFrameCenter, type Framing, type PreviewSource } from "@/lib/framing-schema";
@@ -9,6 +10,8 @@ import { PositionInput } from "./PositionInput";
 
 export interface PreviewBroll { id: string; url: string; start: number; end: number; clipStart: number; label: string }
 interface Props {
+  textCues?: TextCue[];
+  externalLayerSelector?: boolean;
   controlsTarget: HTMLElement | null;
   state: ReturnType<typeof useFraming>;
   clock: RefObject<HTMLVideoElement | null>;
@@ -36,6 +39,7 @@ export function FramingEditor(props: Props) {
   const [dimensions, setDimensions] = useState({ width: WIDTH, height: HEIGHT, key: "" });
   const [guides, setGuides] = useState(false);
   const drag = useRef<{ x: number; y: number; frame: Framing; key: "start" | "end"; bounds: DOMRect } | null>(null);
+  const activeText = props.textCues?.find(cue => position >= cue.start && position < cue.end);
   const selected = broll.find(s => s.id === target);
   const layer = target ? state.document?.broll[target] ?? DEFAULT_LAYER : null;
   const frame = layer?.framing ?? state.document?.shots[String(shot.index)] ?? DEFAULT_FRAMING;
@@ -189,22 +193,29 @@ export function FramingEditor(props: Props) {
           <div className="absolute border border-cyan-400" style={{ left: `${guideRect.x / WIDTH * 100}%`, top: `${guideRect.y / HEIGHT * 100}%`, width: `${guideRect.width / WIDTH * 100}%`, height: `${guideRect.height / HEIGHT * 100}%` }} />
           <Crosshair size={24} className="absolute -translate-x-1/2 -translate-y-1/2 text-cyan-400 drop-shadow" style={{ left: `${(guideRect.x + guideRect.width / 2) / WIDTH * 100}%`, top: `${(guideRect.y + guideRect.height / 2) / HEIGHT * 100}%` }} />
         </div>}
+        {activeText && (
+          // The same rasterizer supplies the preview and exported overlay.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img alt={activeText.text} draggable={false} className="pointer-events-none absolute left-0 w-full"
+            src={`/api/text-preview?${new URLSearchParams({ text: activeText.text, style: JSON.stringify(activeText.style) })}`}
+            style={activeText.style.position === "top" ? { top: `${250 / HEIGHT * 100}%` } : activeText.style.position === "bottom" ? { bottom: `${460 / HEIGHT * 100}%` } : { top: "50%", transform: "translateY(-50%)" }} />
+        )}
         {buffering && <span className="pointer-events-none absolute left-2 top-2 bg-black/70 px-2 py-1 text-xs text-white">Loading preview</span>}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <button className={button} title={playing ? "Pause" : "Play"} aria-label={playing ? "Pause preview" : "Play preview"}
           onClick={() => { const v = clock.current; if (!v) return; if (v.paused) { if (position >= end - 0.04) onSeek(start); void v.play().catch(() => setMediaError("Playback could not start.")); } else v.pause(); }}>
           {playing ? <Pause size={15} /> : <Play size={15} />}
         </button>
         <input aria-label="Preview position" className="min-w-0 flex-1" type="range" min={start} max={end - 0.001} step={0.01}
-          value={clamp(position, start, end - 0.001)} onChange={e => { clock.current?.pause(); onSeek(Number(e.target.value)); }} />
-        <span className="w-20 shrink-0 whitespace-nowrap text-right font-mono text-[11px]">{Math.max(0, position - start).toFixed(1)} / {(end - start).toFixed(1)}s</span>
+          value={clamp(position, start, end - 0.001)} onChange={e => { const time = Number(e.target.value); clock.current?.pause(); setPosition(time); onSeek(time); }} />
+        <span className="w-16 shrink-0 whitespace-nowrap text-right font-mono text-[10px]">{Math.max(0, position - start).toFixed(1)} / {(end - start).toFixed(1)}s</span>
       </div>
       {controlsTarget && createPortal(<div className="flex min-w-0 flex-col gap-4">
       <fieldset aria-label="Framing controls" disabled={!state.document} className="flex min-w-0 flex-col gap-4">
         <div className="flex items-center gap-2">
           <Crop size={16} className="shrink-0" />
-          <select aria-label="Editing layer" className="min-w-0 flex-1 rounded border border-border bg-background p-1.5 text-xs"
+          <select aria-label="Framing layer" hidden={props.externalLayerSelector} className="min-w-0 flex-1 rounded border border-border bg-background p-1.5 text-xs"
             value={target ?? "main"} onChange={e => { const id = e.target.value === "main" ? null : e.target.value; onTarget(id); const seg = broll.find(s => s.id === id); if (seg) onSeek(seg.start); }}>
             <option value="main">Main video - shot {shot.index + 1}</option>
             {broll.map(s => <option key={s.id} value={s.id}>B-roll - {s.label}</option>)}

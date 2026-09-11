@@ -1,3 +1,4 @@
+import { overlayForShot, resolveTextCues } from "./text-cues";
 import { promises as fs } from "fs";
 import { encodeFramedClip } from "./framing-render";
 import type { FramingDocument, Layer } from "./framing-schema";
@@ -18,7 +19,7 @@ import { buildAssSubtitles, type AssEvent } from "./ass-subtitles";
 import { overlayPlacement, rasterizeTextBlock } from "./png-overlays";
 import {
   DEFAULT_TEXT_STYLE,
-  resolveShotOverlay,
+  type TextWord,
   type TextOverlays,
 } from "./text-overlays-schema";
 import type { ClipLibrary } from "./library-schema";
@@ -894,6 +895,7 @@ export interface RenderInput {
   // Saved text edits/toggles + burn style; shots without an entry fall
   // back to the analysis's detected on_screen_text
   textOverlays?: TextOverlays | null;
+  textWords?: TextWord[];
   // Storyboard cutdowns: per shot index, the footage file and file-local
   // range the shot lives in (the master, or an attached clip). Source shots
   // cut from here instead of the short mp4, and "original" audio is
@@ -1330,17 +1332,13 @@ export async function renderRemake(
       const events: Array<{ p: PlannedShot; event: AssEvent }> = [];
       let cursor = 0;
       for (const p of planned) {
-        const { text, include } = resolveShotOverlay(
-          textOverlays,
-          p.shot_index,
-          p.on_screen_text
-        );
-        const trimmed = text.trim();
-        if (include && trimmed) {
-          events.push({
-            p,
-            event: { start: cursor, end: cursor + p.duration, text: trimmed },
-          });
+        const sourceShot = analysis.shots.find(s => s.index === p.shot_index);
+        if (sourceShot) {
+          const entry = overlayForShot(textOverlays, sourceShot);
+          const cues = resolveTextCues({ ...sourceShot, start_time: cursor, end_time: cursor + p.duration,
+            source_start: sourceShot.source_start ?? sourceShot.start_time }, entry, style, sourceShot.source_clip ? [] : input.textWords);
+          if (entry.include && entry.matchSpeech && !cues.length) warnings.push(`Shot ${p.shot_index + 1}: no aligned speech in the text range`);
+          for (const event of cues) events.push({ p, event });
         }
         cursor += p.duration;
       }
@@ -1358,7 +1356,7 @@ export async function renderRemake(
           "Text burn was requested, but every shot's text is empty or excluded — nothing to burn"
         );
         burned = true; // nothing for the ass fallback to do either
-      } else if (style.engine === "png") {
+      } else if (style.engine === "png" || events.some(e => e.event.style?.engine === "png")) {
         try {
           const textDir = join(workDir, "text");
           await fs.mkdir(textDir, { recursive: true });
@@ -1366,17 +1364,18 @@ export async function renderRemake(
           // no filter-graph stream label is consumed twice
           const blockFiles = new Map<string, string>();
           for (const e of events) {
-            if (!blockFiles.has(e.event.text)) {
+            const key = JSON.stringify([e.event.text, e.event.style ?? style]);
+            if (!blockFiles.has(key)) {
               const file = join(textDir, `block_${blockFiles.size}.png`);
               await fs.writeFile(
                 file,
-                await rasterizeTextBlock(e.event.text, style)
+                await rasterizeTextBlock(e.event.text, e.event.style ?? style)
               );
-              blockFiles.set(e.event.text, file);
+              blockFiles.set(key, file);
             }
           }
-          const { x, y } = overlayPlacement(style);
           const steps = events.map((e, i) => {
+            const { x, y } = overlayPlacement(e.event.style ?? style);
             const src = i === 0 ? "[0:v]" : `[v${i}]`;
             const out = i === events.length - 1 ? "[vout]" : `[v${i + 1}]`;
             // End a hair early so back-to-back shots never show two texts
@@ -1396,8 +1395,8 @@ export async function renderRemake(
               "error",
               "-y",
               "-i",
-              outPath,
-              ...events.flatMap((e) => ["-i", blockFiles.get(e.event.text)!]),
+              brollBase,
+              ...events.flatMap((e) => ["-i", blockFiles.get(JSON.stringify([e.event.text, e.event.style ?? style]))!]),
               "-filter_complex",
               steps.join(";"),
               "-map",
@@ -1416,7 +1415,7 @@ export async function renderRemake(
             position: style.position,
             shots_burned: events.length,
           };
-          for (const e of events) e.p.burned_text = e.event.text;
+          for (const p of planned) p.burned_text = events.filter(e => e.p === p).map(e => e.event.text).join(" ") || null;
           burned = true;
         } catch (error) {
           console.error("png text burn failed:", error);
@@ -1449,7 +1448,7 @@ export async function renderRemake(
               "error",
               "-y",
               "-i",
-              outPath,
+              brollBase,
               "-vf",
               "ass=overlays.ass",
               ...ENCODE_ARGS,
@@ -1466,7 +1465,7 @@ export async function renderRemake(
             position: style.position,
             shots_burned: events.length,
           };
-          for (const e of events) e.p.burned_text = e.event.text;
+          for (const p of planned) p.burned_text = events.filter(e => e.p === p).map(e => e.event.text).join(" ") || null;
         } catch (error) {
           console.error("text burn failed:", error);
           warnings.push(

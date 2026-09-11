@@ -1,3 +1,4 @@
+import { withProjectEdit } from "@/lib/project-edit-lock";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { promises as fs } from "fs";
@@ -82,7 +83,7 @@ export async function GET(
 const PutBodyZ = z.object({ segments: z.array(BrollSegmentZ) });
 
 // Replace the whole track (the client always holds the full list)
-export async function PUT(
+async function put(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -247,4 +248,9 @@ export async function POST(
   } finally {
     inFlight.delete(videoId);
   }
+}
+
+export async function PUT(request: NextRequest, context: { params: Promise<{ videoId: string }> }) {
+  const { videoId } = await context.params;
+  return withProjectEdit(videoId, () => put(request, context));
 }

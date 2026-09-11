@@ -32,6 +32,20 @@ export function resolveBrollSegment(
   words: Word[] | null
 ): ResolvedBroll {
   const { anchor } = segment;
+  if (anchor.kind === "span") {
+    const first = shots.find(s => s.index === anchor.shot_index);
+    const last = shots.find(s => s.index === anchor.end_shot_index);
+    const invalid = anchor.invalidReason ?? (!first || !last ? "an endpoint shot was removed" : first.start_time > last.start_time ? "its endpoint shots were reordered" : null);
+    if (invalid || !first || !last) return { id: segment.id, start: first?.start_time ?? 0, end: (first?.start_time ?? 0) + MIN_BROLL_SECONDS, valid: false, reason: invalid ?? "Missing endpoint" };
+    const sw = words?.find(w => w.i === anchor.start_word);
+    const ew = words?.find(w => w.i === anchor.end_word);
+    const a = sw && first.source_start != null ? sw.start - first.source_start : anchor.offset;
+    const b = ew && last.source_start != null ? ew.end - last.source_start : anchor.end_offset;
+    const start = first.start_time + Math.max(0, Math.min(first.end_time - first.start_time, a));
+    const end = last.start_time + Math.max(0, Math.min(last.end_time - last.start_time, b));
+    return { id: segment.id, start: round(start), end: round(end), valid: end - start >= MIN_BROLL_SECONDS,
+      ...(end - start < MIN_BROLL_SECONDS ? { reason: "its endpoints no longer cover enough footage" } : {}) };
+  }
   const shot = shots.find((s) => s.index === anchor.shot_index);
   if (!shot) return { id: segment.id, start: 0, end: 0, valid: false, reason: "its shot no longer exists" };
   if (anchor.kind === "offset") {
@@ -148,4 +162,32 @@ export function phraseForAnchor(anchor: BrollAnchor, words: Word[] | null): stri
 // A segment covering a whole shot (the "place over this shot" action)
 export function anchorForShot(shot: ResolveShot, words: Word[] | null): BrollAnchor {
   return anchorForRange(shot, shot.start_time, shot.end_time, words);
+}
+
+// Keep initial single-shot anchors; promote to independently anchored endpoints
+// when the user stretches or moves a block across a cut.
+export function anchorForTimelineRange(shots: ResolveShot[], start: number, end: number, words: Word[] | null): BrollAnchor {
+  const first = shots.find(s => start >= s.start_time && start < s.end_time);
+  const last = [...shots].reverse().find(s => end > s.start_time && end <= s.end_time + 0.001);
+  if (!first || !last || end - start < MIN_BROLL_SECONDS) throw new Error("Choose a B-roll range inside the video of at least 0.5 seconds");
+  if (first.index === last.index) return { kind: "offset", shot_index: first.index, offset: round(start - first.start_time), duration: round(end - start) };
+  // Keep exact user-entered times. Only bind to a word when the edge is
+  // already at that word; a partial word must not expand the range.
+  const a = first.source_start == null ? undefined : words?.find(w => Math.abs(w.start - (first.source_start! + start - first.start_time)) < 0.02);
+  const b = last.source_start == null ? undefined : words?.find(w => Math.abs(w.end - (last.source_start! + end - last.start_time)) < 0.02);
+  return { kind: "span", shot_index: first.index, end_shot_index: last.index,
+    offset: round(start - first.start_time), end_offset: round(end - last.start_time),
+    ...(a ? { start_word: a.i } : {}),
+    ...(b ? { end_word: b.i } : {}) };
+}
+
+export function phraseForTimelineRange(shots: Array<ResolveShot & { spoken_text?: string }>, start: number, end: number, words: Word[] | null): string {
+  return shots.filter(s => s.start_time < end && s.end_time > start).map(s => {
+    if (words?.length && s.source_start != null) {
+      const a = s.source_start + Math.max(0, start - s.start_time);
+      const b = s.source_start + Math.min(s.end_time - s.start_time, end - s.start_time);
+      return wordsForShot(words, s).filter(w => w.start < b && w.end > a).map(w => w.word).join(" ");
+    }
+    return s.spoken_text ?? "";
+  }).filter(Boolean).join(" ");
 }

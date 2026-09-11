@@ -1,109 +1,65 @@
 "use client";
 
-import { useState } from "react";
+import type { ShotOverlay, TextStyle, TextWord } from "@/lib/text-overlays-schema";
 
-export interface ShotTextEntry {
-  text: string;
-  include: boolean;
-}
-
-export interface ShotTextEditorProps {
-  /** 1-based shot number, for the label */
+interface Props {
   shotNumber: number;
-  /** on_screen_text detected by the Gemini analysis for this shot */
-  detectedText: string;
-  /** Stored override for this shot (null = fall back to detectedText) */
-  entry: ShotTextEntry | null;
+  duration: number;
+  entry: ShotOverlay;
+  defaults: TextStyle;
+  words: TextWord[];
   saving: boolean;
-  onSave: (text: string, include: boolean) => void;
-  /** Delete the stored override, returning to the detected text */
-  onReset: () => void;
+  dirty: boolean;
+  aligning: boolean;
+  error: string | null;
+  onChange: (entry: ShotOverlay) => void;
+  onSave: (entry: ShotOverlay) => void;
+  onAlign: () => void;
 }
-
-// Editable on-screen text for one shot: what the render's text burn stage
-// puts over the chosen library clip. Burns as PNG overlays (rounded TikTok
-// pill, color emoji); ASS subtitles are the fallback engine.
-export function ShotTextEditor({
-  shotNumber,
-  detectedText,
-  entry,
-  saving,
-  onSave,
-  onReset,
-}: ShotTextEditorProps) {
-  const detected = detectedText.trim();
-  const resolved = entry ?? { text: detected, include: detected.length > 0 };
-  const [draft, setDraft] = useState(resolved.text);
-  const edited = entry != null && entry.text.trim() !== detected;
-
-  const commit = (include: boolean) => {
-    const text = draft.trim();
-    // Nothing to store when it still matches what would be resolved anyway
-    if (entry == null && text === detected && include === resolved.include)
-      return;
-    if (entry != null && text === entry.text && include === entry.include)
-      return;
-    onSave(text, include);
+const field = "w-full min-w-0 rounded border border-border bg-background px-2 py-1.5 text-xs outline-none focus:border-primary disabled:opacity-50";
+export function ShotTextEditor({ shotNumber, duration, entry, defaults, words, saving, dirty, aligning, error, onChange, onSave, onAlign }: Props) {
+  const style = { ...defaults, ...entry.style };
+  const change = (patch: Partial<ShotOverlay>, save = true) => {
+    const next = { ...entry, ...patch }; onChange(next); if (save) onSave(next);
   };
-
-  const willBurn = resolved.include && draft.trim().length > 0;
-
-  return (
-    <div className="rounded-md border border-border p-2 flex flex-col gap-1.5">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[10px] font-bold text-foreground uppercase tracking-wide">
-          On-screen text for shot #{shotNumber}
-        </p>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span
-            className={`px-1.5 py-0.5 rounded-full text-[9px] font-semibold uppercase ${
-              willBurn
-                ? "bg-primary/15 text-primary"
-                : "bg-muted text-muted-foreground"
-            }`}
-          >
-            {willBurn ? "will burn" : "not burned"}
-          </span>
-          <label className="flex items-center gap-1 text-[10px] text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={resolved.include}
-              disabled={saving}
-              onChange={(e) => commit(e.target.checked)}
-              className="accent-current"
-            />
-            include in render
-          </label>
-        </div>
+  const setStyle = (patch: Partial<TextStyle>, save = true) => change({ style: { ...entry.style, ...patch } }, save);
+  return <fieldset disabled={saving || aligning} className="flex min-w-0 flex-col gap-3" aria-label={`Text controls for shot ${shotNumber}`}>
+    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={entry.include} onChange={e => change({ include: e.target.checked })} />Show text on video</label>
+    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={entry.matchSpeech ?? false}
+      disabled={!words.length && !entry.matchSpeech}
+      onChange={e => change({ matchSpeech: e.target.checked, ...(e.target.checked ? { words, include: true } : {}) })} />Match spoken words</label>
+    {!words.length && <div className="text-xs text-muted-foreground">Align speech to synchronize captions with this shot.
+      <button type="button" className="ml-2 underline text-foreground" onClick={onAlign}>{aligning ? "Aligning speech…" : "Transcribe & align speech"}</button>
+    </div>}
+    {!entry.matchSpeech ? <label className="flex flex-col gap-1 text-xs">Custom on-screen text
+      <textarea aria-label={`On-screen text for shot ${shotNumber}`} className={field} rows={3} maxLength={500} value={entry.text}
+        onChange={e => change({ text: e.target.value }, false)} onBlur={() => onSave(entry)} placeholder="Type text to show over this shot" />
+    </label> : <div className="flex flex-col gap-2">
+      <p className="text-xs text-muted-foreground">Shown in timed phrases. Correct individual words below without changing their timing.</p>
+      <div className="flex max-h-40 flex-wrap gap-1 overflow-auto" aria-label="Correct spoken words">
+        {words.map((w, i) => <input key={`${w.start}:${i}`} aria-label={`Spoken word ${i + 1}`} title={`${w.start.toFixed(2)}–${w.end.toFixed(2)}s in source`}
+          className={`${field} !w-24`} value={w.text} maxLength={100}
+          onChange={e => change({ words: words.map((word, j) => i === j ? { ...word, text: e.target.value } : word) }, false)}
+          onBlur={() => onSave(entry)} />)}
       </div>
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => commit(resolved.include)}
-        disabled={saving}
-        rows={2}
-        maxLength={500}
-        aria-label={`On-screen text for shot ${shotNumber}`}
-        placeholder="No text detected for this shot — type to add some"
-        className="w-full text-xs rounded-md border border-border bg-transparent p-1.5 outline-none focus:border-primary resize-y disabled:opacity-60"
-      />
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[9px] text-muted-foreground">
-          Burned as PNG overlays · TikTok pill styling · emoji supported ✨
-        </p>
-        {edited && (
-          <button
-            onClick={() => {
-              setDraft(detected);
-              onReset();
-            }}
-            disabled={saving}
-            className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-60"
-          >
-            ↺ reset to detected text
-          </button>
-        )}
-      </div>
+      <p className="text-[11px] text-muted-foreground">Your custom text is kept when you turn speech matching off.</p>
+    </div>}
+    <div className="grid grid-cols-2 gap-3">
+      <label className="text-xs">Style<select aria-label="Text style" className={field} value={style.preset} onChange={e => setStyle({ preset: e.target.value as TextStyle["preset"] })}>
+        <option value="tiktok_box">TikTok box</option><option value="outline">Bold outline</option><option value="caption_bar">Caption bar</option>
+      </select></label>
+      <label className="text-xs">Position<select aria-label="Text position" className={field} value={style.position} onChange={e => setStyle({ position: e.target.value as TextStyle["position"] })}>
+        <option value="top">Upper third</option><option value="center">Center</option><option value="bottom">Lower third</option>
+      </select></label>
+      <label className="text-xs">Size (px)<input aria-label="Text size" className={field} type="number" min={24} max={120} value={style.fontSize ?? (style.preset === "outline" ? 68 : style.preset === "caption_bar" ? 52 : 64)}
+        onChange={e => { if (e.target.value) setStyle({ fontSize: Number(e.target.value) }, false); }} onBlur={() => onSave(entry)} /></label>
+      <label className="text-xs">Color<input aria-label="Text color" className={`${field} h-8`} type="color" value={style.color ?? "#ffffff"} onChange={e => setStyle({ color: e.target.value })} /></label>
+      <label className="text-xs">Start in shot (s)<input aria-label="Text start" className={field} type="number" step="0.1" min={0} max={duration} value={entry.startOffset ?? 0}
+        onChange={e => change({ startOffset: Number(e.target.value) }, false)} onBlur={() => onSave(entry)} /></label>
+      <label className="text-xs">End in shot (s)<input aria-label="Text end" className={field} type="number" step="0.1" min={0} max={duration} value={entry.endOffset ?? duration}
+        onChange={e => change({ endOffset: Number(e.target.value) }, false)} onBlur={() => onSave(entry)} /></label>
     </div>
-  );
+    {error ? <p role="alert" className="text-xs text-red-400">{error} <button type="button" className="underline" onClick={() => onSave(entry)}>Retry save</button></p>
+      : <p role="status" className="text-xs text-muted-foreground">{aligning ? "Aligning speech…" : saving ? "Saving text…" : dirty ? "Unsaved text changes" : "Saved"}</p>}
+  </fieldset>;
 }

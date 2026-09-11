@@ -1,3 +1,4 @@
+import { textOverlaysPath } from "@/lib/text-overlays-store";
 import { NextRequest, NextResponse } from "next/server";
 import { readFraming } from "@/lib/framing-store";
 import { shotSources } from "@/lib/framing-sources";
@@ -15,7 +16,6 @@ import { EditNotesZ, editNotesPath } from "@/lib/edit-notes";
 import { isValidMusicFilename } from "@/lib/music-schema";
 import {
   TextOverlaysZ,
-  textOverlaysPath,
   type TextOverlays,
 } from "@/lib/text-overlays-schema";
 import { ANALYSIS_DIR } from "@/lib/paths";
@@ -195,6 +195,7 @@ export async function POST(
       musicFilename,
       burnText,
       textOverlays,
+      textWords: words?.map(w => ({ text: w.word, start: w.start, end: w.end })),
       sourceShots,
       broll,
     });

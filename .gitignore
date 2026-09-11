@@ -39,6 +39,7 @@ agent-settings.json
 /analysis/
 /library/
 /renders/
+/.framing-previews/
 /generated/
 /benchmarks/
 

@@ -68,3 +68,39 @@ test("anchorForRange prefers words and falls back to an offset", () => {
   assert.equal(wordsForShot(words, shots[0]).length, 7);
   assert.equal(phraseForAnchor({ kind: "words", shot_index: 0, start_word: 0, end_word: 2 }, words), "One two three.");
 });
+
+test("a B-roll block spans shots with continuous timing and distinct endpoints", async () => {
+  const { anchorForTimelineRange } = await import("../src/lib/broll-resolve");
+  const anchor = anchorForTimelineRange(shots, 2, 7, null);
+  assert.equal(anchor.kind, "span");
+  assert.deepEqual(resolveBrollSegment({ id: "span", anchor }, shots, null), { id: "span", start: 2, end: 7, valid: true });
+  assert.throws(() => anchorForTimelineRange(shots, -1, 7, null));
+  assert.throws(() => anchorForTimelineRange(shots, 2, 10, null));
+  const backwards = [ { ...shots[0], start_time: 4.8, end_time: 9 }, { ...shots[1], start_time: 0, end_time: 4.8 } ];
+  assert.equal(resolveBrollSegment({ id: "span", anchor }, backwards, null).valid, false);
+});
+
+test("span anchors survive trims and flag deleted endpoints without attaching to another shot", async () => {
+  const { anchorForTimelineRange } = await import("../src/lib/broll-resolve");
+  const { remapBroll } = await import("../src/lib/timeline-edit");
+  const segment = { id: "span", anchor: anchorForTimelineRange(shots, 2, 7, null), clip: { filename: "broll.mp4", clip_start: 1, source: "library" as const }, status: "placed" as const, phrase: "", description: null, candidates: [], createdAt: "" };
+  const after = [{ ...shots[0], source_start: 13, start_time: 0, end_time: 1.2 }, { ...shots[1], start_time: 1.2, end_time: 6 }];
+  const [trimmed] = remapBroll([segment], [0,1], shots, after);
+  assert.equal(trimmed.clip?.clip_start, 2);
+  const resolved = resolveBrollSegment(trimmed, after, null);
+  assert.equal(resolved.valid, true);
+  assert.equal(resolved.start, 0);
+  const [removed] = remapBroll([segment], [1], shots, [{ ...shots[1], start_time: 0, end_time: 4.8 }]);
+  assert.equal(resolveBrollSegment(removed, [{ ...shots[1], index: 0 }], null).valid, false);
+  assert.equal(removed.anchor.kind, "span");
+});
+
+test("precise B-roll range edits do not expand partial words", async () => {
+  const { anchorForTimelineRange } = await import("../src/lib/broll-resolve");
+  const anchor = anchorForTimelineRange(shots, 1.35, 6.75, words);
+  const result = resolveBrollSegment({ id: "exact", anchor }, shots, words);
+  assert.equal(result.start, 1.35); assert.equal(result.end, 6.75);
+  const single = anchorForTimelineRange(shots, 1.35, 2.85, words);
+  const range = resolveBrollSegment({ id: "single", anchor: single }, shots, words);
+  assert.equal(range.start, 1.35); assert.equal(range.end, 2.85);
+});

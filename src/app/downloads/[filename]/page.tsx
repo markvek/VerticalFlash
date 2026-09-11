@@ -1,5 +1,6 @@
 "use client";
 
+import { intersects, previewTime, textIntersects } from "@/lib/playhead";
 import { playMedia } from "@/lib/media-playback";
 import { FramingEditor } from "@/components/form/FramingEditor";
 import { useFraming } from "@/components/form/useFraming";
@@ -11,6 +12,9 @@ import {
   GEMINI_PRICE_IN_PER_M,
   GEMINI_PRICE_OUT_PER_M,
 } from "@/lib/gemini-pricing";
+import { DEFAULT_TEXT_STYLE, type TextOverlays as TextOverlaysData, type ShotOverlay } from "@/lib/text-overlays-schema";
+import { overlayForShot, resolveTextCues, wordsForOverlay } from "@/lib/text-cues";
+import { ShotInstructionEditor } from "@/components/form/ShotInstructionEditor";
 import { ShotTextEditor } from "@/components/form/ShotTextEditor";
 import { ClipLibraryModal } from "@/components/form/ClipLibraryModal";
 import {
@@ -25,6 +29,8 @@ import { BrollSegmentPopover } from "@/components/form/BrollSegmentPopover";
 import type { BrollAnchor, BrollSegment, BrollTrack } from "@/lib/broll-schema";
 import {
   anchorForRange,
+  anchorForTimelineRange,
+  phraseForTimelineRange,
   anchorForShot,
   brollCoverage,
   MIN_BROLL_SECONDS,
@@ -187,25 +193,6 @@ interface RenderManifest {
   broll?: Array<{ id: string; filename: string; start: number; end: number; clip_start: number; phrase: string }>;
 }
 
-interface TextOverlaysData {
-  videoId: string;
-  updatedAt: string;
-  // engine "png" is accepted but not built yet — the renderer burns with
-  // ASS subtitles until the PNG overlay engine lands
-  style: {
-    engine: "ass" | "png";
-    preset: "tiktok_box" | "outline" | "caption_bar";
-    position: "top" | "center" | "bottom";
-  };
-  shots: Record<string, { text: string; include: boolean }>;
-}
-
-const DEFAULT_TEXT_STYLE: TextOverlaysData["style"] = {
-  engine: "ass",
-  preset: "tiktok_box",
-  position: "top",
-};
-
 interface CaptionHashtag {
   tag: string;
   reason: string;
@@ -367,7 +354,6 @@ function VideoViewerContent() {
   const videoId = extractVideoId(filename);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
-  const [videoUrl, setVideoUrl] = useState<string>("");
   const [playbackError, setPlaybackError] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -406,6 +392,13 @@ function VideoViewerContent() {
     null
   );
   const [textSaving, setTextSaving] = useState(false);
+  const [textDrafts, setTextDrafts] = useState<Record<string, ShotOverlay>>({});
+  const [textError, setTextError] = useState<string | null>(null);
+  const [textAligning, setTextAligning] = useState(false);
+  const [inspector, setInspector] = useState<"frame" | "text" | "text-setup">("frame");
+  const editingPanelRef = useRef<HTMLElement>(null);
+  const textSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const textSaveError = useRef<string | null>(null);
   const [captions, setCaptions] = useState<CaptionsData | null>(null);
   const [captionsLoading, setCaptionsLoading] = useState(false);
   const [captionsError, setCaptionsError] = useState<string | null>(null);
@@ -413,6 +406,8 @@ function VideoViewerContent() {
   // Free-text direction for the caption writer (sent with the request)
   const [captionConcept, setCaptionConcept] = useState("");
   const [scriptOpen, setScriptOpen] = useState(false);
+  const [instructionDrafts, setInstructionDrafts] = useState<Record<string, string>>({});
+  const changeInstruction = (index: number, value: string) => setInstructionDrafts(current => ({ ...current, [String(index)]: value }));
   const [editNotes, setEditNotes] = useState<Record<string, string>>({});
   const [noteShot, setNoteShot] = useState<number | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -438,6 +433,11 @@ function VideoViewerContent() {
   const timelineSaving = useRef(false);
   const resumeSource = useRef(false);
   const pendingSourceSeek = useRef<number | null>(null);
+  const scrubbing = useRef(false);
+  const scrubTime = useRef(0);
+  const requestedSeek = useRef<{ url: string; sourceTime: number; time: number } | null>(null);
+  const textTargetShot = useRef<number | null>(null);
+  const textSetupTime = useRef<number | null>(null);
   // A cutdown's master transcript, for snapping drags to words
   const [masterSegs, setMasterSegs] = useState<{ words: Word[]; sentences: Sentence[] } | null>(null);
   // The B-roll track: voice-anchored segments over the speaker
@@ -484,10 +484,10 @@ function VideoViewerContent() {
   };
 
   const selectedSourceUrl = timelineData?.sources[selectedShot]?.url;
+  const videoUrl = selectedSourceUrl ?? `/api/downloads/${encodeURIComponent(filename)}`;
   useEffect(() => {
     // Loading source metadata may switch files after playback has begun.
-    if (videoRef.current && !videoRef.current.paused) resumeSource.current = true;
-    setVideoUrl(selectedSourceUrl ?? `/api/downloads/${encodeURIComponent(filename)}`);
+    if (!scrubbing.current && !requestedSeek.current && videoRef.current && !videoRef.current.paused) resumeSource.current = true;
     setPlaybackError(false);
   }, [filename, selectedSourceUrl]);
 
@@ -699,7 +699,7 @@ function VideoViewerContent() {
   useEffect(() => {
     const strip = timelineRef.current;
     const s = analysis?.shots[selectedShot];
-    if (strip && s) {
+    if (strip && s && !scrubbing.current) {
       const center = ((s.start_time + s.end_time) / 2) * PX_PER_SEC;
       strip.scrollTo({
         left: center - strip.clientWidth / 2,
@@ -724,7 +724,7 @@ function VideoViewerContent() {
       if (
         e.target instanceof HTMLElement &&
         e.target.closest(
-          "button, input, textarea, select, a, video, [contenteditable]"
+          'button, input, textarea, select, a, video, [role="slider"], [contenteditable]'
         )
       ) {
         return;
@@ -819,18 +819,22 @@ function VideoViewerContent() {
   };
 
   // Save (or clear, when empty) the fix note for one shot
-  const saveNote = async (shotIndex: number): Promise<boolean> => {
+  const saveNote = async (shotIndex: number, text = noteDraft): Promise<boolean> => {
     if (!videoId || noteSaving) return false;
     setNoteSaving(true);
     try {
       const res = await fetch(`/api/analyze/${videoId}/edit-notes`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shot_index: shotIndex, note: noteDraft }),
+        body: JSON.stringify({ shot_index: shotIndex, note: text }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Saving the note failed");
       setEditNotes(data.notes || {});
+      setInstructionDrafts(current => {
+        if (current[String(shotIndex)] !== text) return current;
+        const next = { ...current }; delete next[String(shotIndex)]; return next;
+      });
       setNoteShot(null);
       return true;
     } catch (error) {
@@ -851,23 +855,45 @@ function VideoViewerContent() {
   // Save a per-shot text override/toggle ({shot_index, text, include} or
   // {shot_index, reset}) or a burn-style change ({style}) for the render's
   // text burn stage
-  const patchTextOverlays = async (body: object) => {
-    if (!videoId || textSaving) return;
-    setTextSaving(true);
+  const patchTextOverlays = (body: object): Promise<void> => {
+    const task = textSaveQueue.current.catch(() => {}).then(async () => {
+      if (!videoId) return;
+      setTextSaving(true); setTextError(null); textSaveError.current = null;
+      try {
+        const res = await fetch(`/api/analyze/${videoId}/text-overlays`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Saving the text failed");
+        setTextOverlays(data);
+        // Keep any newer local draft while an earlier save is finishing.
+        if ("shot_index" in body) setTextDrafts(current => {
+          const index = String(body.shot_index);
+          const next = { ...current };
+          if (JSON.stringify({ ...current[index], shot_index: body.shot_index }) === JSON.stringify(body)) delete next[index];
+          return next;
+        });
+      } catch (error) {
+        textSaveError.current = error instanceof Error ? error.message : "Saving the text failed";
+        setTextError(textSaveError.current);
+      } finally { setTextSaving(false); }
+    });
+    textSaveQueue.current = task;
+    return task;
+  };
+  const alignText = async () => {
+    if (!videoId || textAligning) return;
+    const index = selectedShot;
+    setTextAligning(true); setTextError(null);
     try {
-      const res = await fetch(`/api/analyze/${videoId}/text-overlays`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      await textSaveQueue.current;
+      const res = await fetch(`/api/analyze/${videoId}/text-overlays`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shot_index: index }) });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Saving the text failed");
+      if (!res.ok) throw new Error(data.error || "Speech alignment failed");
       setTextOverlays(data);
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Saving the text failed");
-    } finally {
-      setTextSaving(false);
-    }
+      setTextDrafts(current => { const next = { ...current }; delete next[String(index)]; return next; });
+    } catch (error) { setTextError(error instanceof Error ? error.message : "Speech alignment failed"); }
+    finally { setTextAligning(false); }
   };
 
   const handleGenerateCaptions = async () => {
@@ -909,7 +935,10 @@ function VideoViewerContent() {
     if (!videoId || rendering) return;
     setRendering(true);
     setRenderError(null);
+    setPanelTab("render");
     try {
+      await textSaveQueue.current;
+      if (textSaveError.current) throw new Error(`Save text changes before rendering: ${textSaveError.current}`);
       await framing.flush();
       const res = await fetch(`/api/analyze/${videoId}/render`, {
         method: "POST",
@@ -944,6 +973,7 @@ function VideoViewerContent() {
   const selectShot = (index: number, seek = true) => {
     if (!analysis) return;
     const clamped = Math.max(0, Math.min(index, analysis.shots.length - 1));
+    requestedSeek.current = null;
     setFrameTarget(null);
     // Clicking the shot that's already selected toggles play/pause
     // instead of re-seeking to its start
@@ -966,7 +996,7 @@ function VideoViewerContent() {
 
   // Follow playback: move the playhead and highlight the shot under it
   const handleTimeUpdate = () => {
-    if (!analysis || trimBeat) return;
+    if (!analysis || trimBeat || scrubbing.current || requestedSeek.current) return;
     const video = videoRef.current;
     if (!video) return;
     const t = video.currentTime;
@@ -992,7 +1022,7 @@ function VideoViewerContent() {
           setPlayheadTime(next.start);
         } else {
           video.pause();
-          setPlayheadTime(beat.end);
+          setPlayheadTime(previewTime(beat.end, beat.end));
         }
         return;
       }
@@ -1002,14 +1032,14 @@ function VideoViewerContent() {
         video.currentTime = Math.max(beat.source_start, Math.min(beat.source_end, t));
         return;
       }
-      setPlayheadTime(beat.start + (t - beat.source_start));
+      setPlayheadTime(previewTime(beat.start + (t - beat.source_start), analysis.shots.at(-1)?.end_time ?? 0));
       return;
     }
 
     // Loop mode: cycle the selected shot instead of playing through
     if (loopShot) {
       const s = analysis.shots[selectedShot];
-      if (s && (t >= s.end_time || t < s.start_time - 0.05)) {
+      if (!video.paused && s && (t >= s.end_time || t < s.start_time - 0.05)) {
         video.currentTime = s.start_time;
         setPlayheadTime(s.start_time);
         return;
@@ -1025,6 +1055,24 @@ function VideoViewerContent() {
     if (idx !== -1 && idx !== selectedShot) setSelectedShot(idx);
   };
 
+  // Native timeupdate is too sparse for a moving timeline cursor. Follow
+  // playback at display cadence (capped at 30 updates/sec), using the same
+  // cut/source handling as media events and never overriding a scrub.
+  const playbackUpdate = useRef(handleTimeUpdate);
+  playbackUpdate.current = handleTimeUpdate;
+  useEffect(() => {
+    let frame = 0, last = 0;
+    const tick = (now: number) => {
+      const video = videoRef.current;
+      if (video && !video.paused && !video.seeking && now - last >= 1000 / 30) {
+        last = now; playbackUpdate.current();
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
   // Timeline drag: persist the new shot times (the server re-lays the
   // cutdown's timeline and refreshes the affected frames)
   const editClips = async (operation: TimelineOperation | { type: "undo" | "redo" }) => {
@@ -1032,6 +1080,7 @@ function VideoViewerContent() {
     timelineSaving.current = true;
     setRetiming(true); setTimelineError(null);
     videoRef.current?.pause();
+    requestedSeek.current = null;
     pendingSourceSeek.current = null; resumeSource.current = false;
     try {
       if (framing.document) await framing.flush();
@@ -1050,7 +1099,8 @@ function VideoViewerContent() {
       setTimelineData(saved); setAnalysis(saved.analysis); setProject(saved.project);
       setRecs(saved.sidecars.recommendations); setGeneration(saved.sidecars.generation);
       setEditNotes(saved.sidecars["edit-notes"]?.notes ?? {});
-      setTextOverlays(saved.sidecars["text-overlays"]); setBrollTrack(saved.sidecars.broll);
+      setInstructionDrafts({});
+      setTextOverlays(saved.sidecars["text-overlays"]); setTextDrafts({}); setBrollTrack(saved.sidecars.broll);
       framing.replace(saved.sidecars.framing);
       setBrollSelected(null); setFrameTarget(null); setPreviewClip(null); setNoteShot(null);
       const index = operation.type === "move" ? operation.to : Math.min(selectedShot, saved.analysis.shots.length - 1);
@@ -1284,16 +1334,42 @@ function VideoViewerContent() {
     recs?.shots.find((s) => s.shot_index === selectedShot)
       ?.selected_filename ?? null;
   const selectedKeepSource = keepSourceByShot.get(selectedShot) === true;
-  const seekPreview = (time: number) => {
+  // A seek belongs to a specific source URL, not whichever player happens
+  // to be mounted. Keep the newest request until that source has settled.
+  const applyRequestedSeek = (video: HTMLVideoElement) => {
+    const request = requestedSeek.current;
+    if (!request || video.readyState < 1 || video.currentSrc !== new URL(request.url, window.location.href).href) return false;
+    video.currentTime = request.sourceTime;
+    return true;
+  };
+  const settleRequestedSeek = (video: HTMLVideoElement) => {
+    const request = requestedSeek.current;
+    if (request && !video.seeking && video.currentSrc === new URL(request.url, window.location.href).href && Math.abs(video.currentTime - request.sourceTime) < 0.06) {
+      requestedSeek.current = null;
+    }
+  };
+  const seekPreview = (requestedTime: number) => {
     if (!analysis) return;
-    const s = analysis.shots.find(s => time >= s.start_time && time < s.end_time) ?? shot;
+    const time = previewTime(requestedTime, analysis.shots.at(-1)?.end_time ?? 0);
+    const s = analysis.shots.find(s => intersects(time, s.start_time, s.end_time));
     if (!s) return;
+    scrubTime.current = time;
     setSelectedShot(s.index); setPlayheadTime(time);
     const sourceTime = sourceBacked ? (s.source_start ?? s.start_time) - sourceOffset(s.index) + time - s.start_time : time;
-    if (timelineData?.sources[s.index]?.url !== selectedSourceUrl) {
-      pendingSourceSeek.current = sourceTime; resumeSource.current = false;
-    }
-    if (videoRef.current) videoRef.current.currentTime = sourceTime;
+    const url = timelineData?.sources[s.index]?.url ?? `/api/downloads/${encodeURIComponent(filename)}`;
+    requestedSeek.current = { url, sourceTime, time };
+    pendingSourceSeek.current = null; resumeSource.current = false;
+    if (videoRef.current) applyRequestedSeek(videoRef.current);
+  };
+  const startScrub = () => {
+    scrubbing.current = true;
+    scrubTime.current = playheadTime;
+    resumeSource.current = false;
+    videoRef.current?.pause();
+  };
+  const endScrub = () => {
+    scrubbing.current = false;
+    videoRef.current?.pause();
   };
   // Cutdown beats map 1:1 to shots, so a shot's section is its beat's
   const sectionForShot = (index: number) =>
@@ -1328,6 +1404,26 @@ function VideoViewerContent() {
   };
 
   const textStyle = textOverlays?.style ?? DEFAULT_TEXT_STYLE;
+  const textEntry = (index: number) => textDrafts[String(index)] ?? overlayForShot(textOverlays, analysis!.shots[index]);
+  const textWords = (index: number) => wordsForOverlay(analysis!.shots[index], textEntry(index),
+    analysis!.shots[index].source_clip ? [] : (masterSegs?.words ?? []).map(w => ({ text: w.word, start: w.start, end: w.end })));
+  const changeText = (index: number, entry: ShotOverlay) => setTextDrafts(current => ({ ...current, [String(index)]: entry }));
+  const saveText = (index: number, entry: ShotOverlay) => { changeText(index, entry); void patchTextOverlays({ ...entry, shot_index: index }); };
+  const selectText = (index: number) => {
+    const selected = analysis!.shots[index], entry = textEntry(index);
+    const time = previewTime(selected.start_time + (entry.startOffset ?? 0), selected.end_time);
+    videoRef.current?.pause(); seekPreview(time);
+    textTargetShot.current = index; textSetupTime.current = time;
+    setFrameTarget(null); setInspector(textIntersects(time, selected, entry, burnText) ? "text" : "text-setup"); setPanelTab("video");
+    editingPanelRef.current?.scrollTo({ top: 0 });
+  };
+  const matchSpeech = (index: number, enabled: boolean) => {
+    const words = textWords(index);
+    if (enabled && !words.length) { selectText(index); setTextError("Use Transcribe & align speech to enable synchronized captions."); return; }
+    saveText(index, { ...textEntry(index), matchSpeech: enabled, ...(enabled ? { words, include: true } : {}) });
+  };
+  const previewTextCues = shot && burnText ? resolveTextCues(shot, textEntry(shot.index), textStyle, textWords(shot.index)) : [];
+
 
   // Shot frames are regenerated in place by timeline edits; bust the cache
   const shotThumb = (s: AnalysisShot) =>
@@ -1357,6 +1453,18 @@ function VideoViewerContent() {
       ? [{ id: segment.id, url: clipSrc(segment.clip.filename), start: range.start, end: range.end,
           clipStart: segment.clip.clip_start ?? 0, label: segment.phrase || segment.clip.filename }] : [];
   });
+  const layerTime = previewTime(playheadTime, analysis?.shots.at(-1)?.end_time ?? 0);
+  const activeShot = analysis?.shots.find(s => intersects(layerTime, s.start_time, s.end_time));
+  const activeTextLayer = !!activeShot && textIntersects(layerTime, activeShot, textEntry(activeShot.index), burnText);
+  const activeBroll = previewBroll.filter(b => intersects(layerTime, b.start, b.end));
+  const activeFrameTarget = activeBroll.some(b => b.id === frameTarget) ? frameTarget : null;
+  const effectiveInspector = inspector === "text-setup" && textTargetShot.current === selectedShot && textSetupTime.current === playheadTime
+    ? (activeTextLayer ? "text" : "text-setup")
+    : inspector === "text" && activeTextLayer && textTargetShot.current === activeShot?.index ? "text" : "frame";
+  useEffect(() => {
+    if (inspector !== effectiveInspector) setInspector(effectiveInspector);
+    if (frameTarget !== activeFrameTarget) setFrameTarget(activeFrameTarget);
+  }, [inspector, effectiveInspector, frameTarget, activeFrameTarget]);
   const previewSources = framing.sources[String(selectedShot)] ?? [];
   const brollBlocks = (brollTrack?.segments ?? []).map((s) => {
     const r = brollResolved.find((x) => x.id === s.id);
@@ -1429,10 +1537,11 @@ function VideoViewerContent() {
   };
   const brollChangeRange = (id: string, start: number, end: number) => {
     const seg = brollTrack?.segments.find((s) => s.id === id);
-    const shot = seg && brollShots.find((s) => s.index === seg.anchor.shot_index);
-    if (!seg || !shot) return;
-    const anchor = anchorForRange(shot, start, end, masterWords);
-    brollUpdate(id, (s) => ({ ...s, anchor, phrase: phraseForAnchor(anchor, masterWords) }));
+    if (!seg) return;
+    try {
+      const anchor = anchorForTimelineRange(brollShots, start, end, masterWords);
+      void brollUpdate(id, s => ({ ...s, anchor, phrase: phraseForTimelineRange(brollShots, start, end, masterWords) }));
+    } catch (error) { alert(error instanceof Error ? error.message : "Invalid B-roll range"); }
   };
   const brollRemove = (id: string) => {
     if (frameTarget === id) setFrameTarget(null);
@@ -1494,6 +1603,10 @@ function VideoViewerContent() {
           onSelect: (id, rect) => {
             setBrollSelected(id);
             setBrollRect(rect);
+            if (id) { setInspector("frame"); setFrameTarget(id); setPanelTab("video");
+              const block = brollBlocks.find(b => b.id === id);
+              if (block?.valid) { videoRef.current?.pause(); seekPreview(block.start); }
+            }
           },
           onChangeRange: brollChangeRange,
           onCreateAt: brollCreateAt,
@@ -1844,8 +1957,7 @@ function VideoViewerContent() {
                 </select>
               </div>
               <p className="text-[10px] text-muted-foreground">
-                Edit each shot&apos;s text in the B-Roll Clips tab · burned as
-                ASS subtitles
+                Edit each shot&apos;s text in Video Editing. Text stays above B-roll.
               </p>
             </div>
           )}
@@ -2000,7 +2112,7 @@ function VideoViewerContent() {
         {/* Ribbon 1: video player + the active tab's panel */}
         <div className={analysis ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
           <div className={`${styles.player} mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0`}>
-            <div className={shot && (panelTab === "video" || panelTab === "shots" || panelTab === "clips") ? "hidden" : "rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center"}>
+            <div className={shot ? "hidden" : "rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center"}>
               {playbackError ? (
                 <div className="p-6 text-center">
                   <p className="text-sm font-medium text-white">
@@ -2024,7 +2136,9 @@ function VideoViewerContent() {
                     className="w-full h-full object-contain"
                     onError={() => setPlaybackError(true)}
                     onTimeUpdate={handleTimeUpdate}
+                    onSeeked={e => settleRequestedSeek(e.currentTarget)}
                     onLoadedMetadata={(e) => {
+                      if (requestedSeek.current) { applyRequestedSeek(e.currentTarget); return; }
                       if (sourceBacked) {
                         e.currentTarget.currentTime = pendingSourceSeek.current ?? playerTimeFor(selectedShot);
                         pendingSourceSeek.current = null;
@@ -2038,18 +2152,20 @@ function VideoViewerContent() {
                 )
               )}
             </div>
-            {shot && (panelTab === "video" || panelTab === "shots" || panelTab === "clips") && (
-              <FramingEditor state={framing} clock={videoRef} shot={shot} source={previewSources} controlsTarget={framingControlsTarget}
-                broll={previewBroll} target={previewBroll.some(s => s.id === frameTarget) ? frameTarget : null}
+            {shot && (
+              <FramingEditor textCues={previewTextCues} externalLayerSelector state={framing} clock={videoRef} shot={shot} source={previewSources} controlsTarget={framingControlsTarget}
+                broll={previewBroll} target={activeFrameTarget}
                 onTarget={setFrameTarget} onSeek={seekPreview}
                 getTime={() => {
+                  if (requestedSeek.current) return requestedSeek.current.time;
+                  if (scrubbing.current) return scrubTime.current;
                   const time = videoRef.current?.currentTime ?? 0;
                   return sourceBacked ? shot.start_time + time - (shot.source_start ?? shot.start_time) + sourceOffset(shot.index) : time;
                 }} />
             )}
           </div>
 
-          <section aria-label="Editing panel" tabIndex={analysis ? 0 : undefined} className={`flex flex-col gap-3 min-w-0 ${analysis ? styles.panel : ""}`}>
+          <section ref={editingPanelRef} aria-label="Editing panel" tabIndex={analysis ? 0 : undefined} className={`flex flex-col gap-3 min-w-0 ${analysis ? styles.panel : ""}`}>
             {analysis && (
               <div className="flex shrink-0 flex-col gap-3">
                 {titleBlock}
@@ -2068,7 +2184,35 @@ function VideoViewerContent() {
                 {panelTab === "video" && (
                   <section aria-label="Video editing" className="flex w-full max-w-lg flex-col gap-4">
                     <h2 className="text-sm font-semibold">Frame &amp; Layers</h2>
-                    <div ref={setFramingControlsTarget} />
+                    <label className="flex flex-col gap-1 text-xs">Editing layer
+                      <select aria-label="Editing layer" className="min-w-0 rounded border border-border bg-background p-2" value={effectiveInspector === "text" ? "text" : activeFrameTarget ?? "main"}
+                        onChange={e => { const value = e.target.value; textTargetShot.current = selectedShot;
+                          setInspector(value === "text" ? "text" : "frame"); setFrameTarget(value === "main" || value === "text" ? null : value);
+                        }}>
+                        {activeShot && <option value="main">Main video — shot {activeShot.index + 1}</option>}
+                        {activeTextLayer && <option value="text">On-screen text — shot {activeShot!.index + 1}</option>}
+                        {activeBroll.map(b => <option key={b.id} value={b.id}>B-roll — {b.label}</option>)}
+                      </select>
+                    </label>
+                    <div className={effectiveInspector !== "frame" ? "hidden" : ""} ref={setFramingControlsTarget} />
+                    {shot && effectiveInspector !== "frame" && <>
+                      {effectiveInspector === "text-setup" && <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <span>Set up on-screen text for shot {selectedShot + 1}</span>
+                        <button className="underline" onClick={() => setInspector("frame")}>Back to frame</button>
+                      </div>}
+                      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={burnText} onChange={e => setBurnText(e.target.checked)} />Include on-screen text in preview &amp; export</label>
+                      {!burnText && <p className="text-xs text-amber-400">All on-screen text is currently hidden.</p>}
+                      <ShotTextEditor shotNumber={selectedShot + 1} duration={shot.end_time - shot.start_time} entry={textEntry(selectedShot)} defaults={textStyle}
+                        words={textWords(selectedShot)} dirty={!!textDrafts[String(selectedShot)]} saving={textSaving} aligning={textAligning} error={textError}
+                        onChange={entry => changeText(selectedShot, entry)} onSave={entry => saveText(selectedShot, entry)} onAlign={() => void alignText()} />
+                    </>}
+                    {shot && effectiveInspector === "frame" && <div className="flex flex-col gap-2 border-t border-border pt-3">
+                      <p className="text-xs text-muted-foreground">{shot.description}</p>
+                      <p className="text-xs">{shot.spoken_text}</p>
+                      <label className="text-xs font-semibold">AI editing instructions</label>
+                      <div className="h-28"><ShotInstructionEditor key={selectedShot} index={selectedShot} draft={instructionDrafts[String(selectedShot)]} onDraftChange={changeInstruction} note={editNotes[String(selectedShot)] ?? ""} description={shot.description}
+                        busy={noteSaving || rendering} onSave={saveNote} onApply={() => void handleRender()} /></div>
+                    </div>}
                   </section>
                 )}
                 {/* Shots: one card per shot — time, section, what
@@ -2220,32 +2364,7 @@ function VideoViewerContent() {
                           time; B-roll clips are ignored.
                         </p>
                       )}
-                      {analysis?.shots[selectedShot] && (
-                        <ShotTextEditor
-                          key={selectedShot}
-                          shotNumber={selectedShot + 1}
-                          detectedText={
-                            analysis.shots[selectedShot].on_screen_text
-                          }
-                          entry={
-                            textOverlays?.shots[String(selectedShot)] ?? null
-                          }
-                          saving={textSaving}
-                          onSave={(text, include) =>
-                            patchTextOverlays({
-                              shot_index: selectedShot,
-                              text,
-                              include,
-                            })
-                          }
-                          onReset={() =>
-                            patchTextOverlays({
-                              shot_index: selectedShot,
-                              reset: true,
-                            })
-                          }
-                        />
-                      )}
+                      <button className="self-start text-xs underline" onClick={() => selectText(selectedShot)}>Edit on-screen text in Video Editing</button>
                       <div
                         className={`flex gap-3 items-start ${
                           selectedKeepSource ? "opacity-50" : ""
@@ -3053,7 +3172,7 @@ function VideoViewerContent() {
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <h2 id="editor-timeline-heading" className="text-sm font-bold uppercase tracking-wide">Timeline</h2>
               <span className="text-xs text-muted-foreground">Clip {selectedShot + 1} · {(shot.end_time - shot.start_time).toFixed(2)}s · Total {analysis.shots[analysis.shots.length - 1].end_time.toFixed(2)}s</span>
-              <fieldset disabled={!timelineData || timelineData.sources.some(s => !s) || retiming || rendering || matching || textSaving || noteSaving || !!brollBusy || framing.status === "Saving"} className="ml-auto flex flex-wrap items-center gap-1 disabled:opacity-50">
+              <fieldset disabled={!timelineData || timelineData.sources.some(s => !s) || retiming || rendering || matching || textSaving || textAligning || noteSaving || !!brollBusy || framing.status === "Saving"} className="ml-auto flex flex-wrap items-center gap-1 disabled:opacity-50">
                 <button onClick={openClipTrim} title="Adjust length" className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted"><Scissors className="size-3" /> Adjust length</button>
                 <button disabled={selectedShot === 0} onClick={() => void editClips({ type: "move", index: selectedShot, to: selectedShot - 1 })} aria-label="Move clip left" title="Move clip left" className="rounded p-2 hover:bg-muted disabled:opacity-30"><ArrowLeft className="size-3" /></button>
                 <button disabled={selectedShot === analysis.shots.length - 1} onClick={() => void editClips({ type: "move", index: selectedShot, to: selectedShot + 1 })} aria-label="Move clip right" title="Move clip right" className="rounded p-2 hover:bg-muted disabled:opacity-30"><ArrowRight className="size-3" /></button>
@@ -3072,22 +3191,27 @@ function VideoViewerContent() {
               onSeek={seconds => { const video = videoRef.current; if (video) { video.currentTime = seconds - sourceOffset(selectedShot); void playMedia(video).catch(() => {}); } }} />}
             <div aria-label="Timeline tracks and transcript" tabIndex={0} className={styles.timelineContent}>
               <ShotTimeline
+                text={{ enabled: burnText, entry: textEntry, label: i => textEntry(i).matchSpeech ? textWords(i).map(w => w.text).join(" ") : textEntry(i).text,
+                  onSelect: selectText, onMatchSpeech: matchSpeech, busy: textSaving || textAligning }}
+                instructions={{ notes: editNotes, drafts: instructionDrafts, onDraftChange: changeInstruction, busy: noteSaving || rendering, onSave: saveNote, onApply: () => void handleRender() }}
                 shots={analysis.shots.map((s) => ({
                   ...s,
                   source_start: s.source_start ?? s.start_time,
                   source_end: s.source_end ?? s.end_time,
                   screenshot: shotThumb(s),
-                  title: s.on_screen_text || s.description,
+                  title: s.description,
+                  sourceName: s.source_clip ?? filename,
                 }))}
                 selectedShot={selectedShot}
                 playheadTime={playheadTime}
+                onSeek={seekPreview} onScrubStart={startScrub} onScrubEnd={endScrub}
                 timelineRef={timelineRef}
                 pxPerSec={PX_PER_SEC}
                 sectionFor={(i) => {
                   const section = sectionForShot(i);
                   return section ? SECTION_BADGES[section] : null;
                 }}
-                onSelectShot={selectShot}
+                onSelectShot={(index, seek) => { setInspector("frame"); setPanelTab("video"); selectShot(index, seek); }}
                 confidenceStyles={CONFIDENCE_STYLES}
                 recs={
                   recs
@@ -3187,13 +3311,15 @@ function VideoViewerContent() {
           if (!seg || !block) return null;
           return (
             <BrollSegmentPopover
+              onChangeRange={(start, end) => brollChangeRange(seg.id, start, end)}
+              projectDuration={shortLength}
               segment={{ ...block, candidates: seg.candidates }}
               anchorRect={brollRect}
               thumbSrc={thumbSrc}
               clipSrc={clipSrc}
               busy={brollBusy}
               onFrame={seg.status === "placed" && seg.clip ? () => {
-                setFrameTarget(seg.id); setBrollSelected(null); setPanelTab("video");
+                setInspector("frame"); setFrameTarget(seg.id); setBrollSelected(null); setPanelTab("video");
                 videoRef.current?.pause(); seekPreview(block.start);
               } : undefined}
               onClose={() => setBrollSelected(null)}

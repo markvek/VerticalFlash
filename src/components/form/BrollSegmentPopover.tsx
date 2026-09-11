@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Crop, X } from "lucide-react";
 import type { BrollCandidate } from "@/lib/broll-schema";
 
@@ -24,6 +24,8 @@ export interface PopoverSegment {
 
 export interface BrollSegmentPopoverProps {
   onFrame?: () => void;
+  onChangeRange?: (start: number, end: number) => void;
+  projectDuration?: number;
   segment: PopoverSegment;
   anchorRect: { left: number; right: number; top: number; bottom: number } | null;
   thumbSrc: (filename: string) => string;
@@ -49,6 +51,8 @@ const WIDTH = 400;
 
 export function BrollSegmentPopover({
   onFrame,
+  onChangeRange,
+  projectDuration,
   segment,
   anchorRect,
   thumbSrc,
@@ -63,6 +67,11 @@ export function BrollSegmentPopover({
   onRemove,
 }: BrollSegmentPopoverProps) {
   const ref = useRef<HTMLDivElement>(null);
+  const [rangeStart, setRangeStart] = useState(segment.start);
+  const [rangeEnd, setRangeEnd] = useState(segment.end);
+  const [clipDuration, setClipDuration] = useState<number | null>(null);
+  useEffect(() => { setRangeStart(segment.start); setRangeEnd(segment.end); }, [segment.id, segment.start, segment.end]);
+  useEffect(() => { setClipDuration(null); }, [segment.clip?.filename]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -120,6 +129,15 @@ export function BrollSegmentPopover({
         </button>
       </div>
 
+      {onChangeRange && <form className="flex flex-col gap-2 rounded border border-border p-2" onSubmit={e => { e.preventDefault(); if (rangeEnd - rangeStart >= 0.5) onChangeRange(rangeStart, rangeEnd); }}>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-xs">Start (s)<input aria-label="B-roll start" className="w-full rounded border border-border bg-background px-2 py-1" type="number" step="0.1" min={0} max={projectDuration} required value={rangeStart} onChange={e => setRangeStart(Number(e.target.value))} /></label>
+          <label className="text-xs">End (s)<input aria-label="B-roll end" className="w-full rounded border border-border bg-background px-2 py-1" type="number" step="0.1" min={rangeStart + 0.5} max={projectDuration} required value={rangeEnd} onChange={e => setRangeEnd(Number(e.target.value))} /></label>
+        </div>
+        <p className="text-[11px] text-muted-foreground">A continuous clip can span multiple main-video shots. Minimum 0.5s.</p>
+        {clipDuration != null && rangeEnd - rangeStart > clipDuration - clipStart && <p className="text-xs text-amber-400">This range exceeds the available footage. The last frame will hold for {(rangeEnd - rangeStart - Math.max(0, clipDuration - clipStart)).toFixed(1)}s.</p>}
+        <button disabled={busy != null} className="self-start rounded border border-border px-2 py-1 text-xs disabled:opacity-50">Apply range</button>
+      </form>}
       {segment.clip && (
         <div className="flex gap-2 items-start rounded-md border border-border p-2">
           <div className="w-[72px] shrink-0 rounded overflow-hidden bg-black aspect-[9/16]">
@@ -130,6 +148,7 @@ export function BrollSegmentPopover({
               playsInline
               className="w-full h-full object-cover"
               onLoadedMetadata={(e) => {
+                setClipDuration(e.currentTarget.duration);
                 e.currentTarget.currentTime = clipStart;
               }}
               onTimeUpdate={(e) => {

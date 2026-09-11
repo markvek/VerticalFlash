@@ -2,6 +2,12 @@
   min-width: 0;
 }
 
+.workspace .player {
+  /* Scale the site preview uniformly; the canvas and export stay 1080×1920. */
+  width: 75%;
+  max-width: 270px;
+}
+
 .panel {
   min-height: 0;
   max-height: 60dvh;
@@ -24,7 +30,7 @@
 @media (min-width: 1024px) {
   .workspace {
     /* Reserve space for playback controls and the timeline on shorter screens. */
-    --preview-height: min(568.889px, calc(60dvh - 76px));
+    --preview-height: calc(min(568.889px, calc(60dvh - 76px)) * 0.75);
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
@@ -46,6 +52,7 @@
 
   .workspace .player {
     min-height: 0;
+    width: 100%;
   }
 
   .workspace .panel {
