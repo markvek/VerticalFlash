@@ -16,6 +16,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "test:backend": "node --import tsx --test scripts/backend-regressions.test.ts",
     "test:projects": "node --import tsx --test scripts/project-storage.test.ts",
     "test:agents": "node --import tsx --test scripts/agent-kit.test.ts",
     "test:benchmarks": "node --import tsx --test scripts/benchmark-store.test.ts",

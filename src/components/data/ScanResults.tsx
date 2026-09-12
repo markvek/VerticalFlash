@@ -44,6 +44,7 @@ export function ScanResults({ data }: ScanResultsProps) {
 
   return (
     <div className="space-y-8">
+      {!!data.errors?.length && <div role="alert" className="text-amber-600">Some searches failed. {data.errors.map(e => `${e.query}: ${e.message}`).join("; ")}</div>}
       {hasHashtags && (
         <section className="space-y-4">
           <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">

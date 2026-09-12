@@ -273,6 +273,7 @@ export function GenerationPanel({
             runAction("generate", {
               shot_index: shotIndex,
               use_references: useReferences,
+              prompt: draft.trim(),
             })
           }
           disabled={generating || drafting || !draft.trim()}

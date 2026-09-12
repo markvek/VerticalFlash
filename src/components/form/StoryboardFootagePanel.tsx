@@ -1,4 +1,5 @@
 "use client";
+import { clipDescription, clipTags } from "@/lib/library-metadata";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2, Plus, RefreshCw, Search, Upload } from "lucide-react";
@@ -90,8 +91,8 @@ export function StoryboardFootagePanel({ videoId, mode, onIncluded }: { videoId:
         <dl className="space-y-3">
           <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Filename</dt><dd className="break-all">{active.clip.filename}</dd></div>
           <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Date</dt><dd>{active.clip.date ? new Date(active.clip.date).toLocaleDateString() : "No date set"}</dd></div>
-          <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Description</dt><dd>{active.clip.analysis?.description || active.clip.description || "No description"}</dd></div>
-          <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Tags</dt><dd className="flex flex-wrap gap-1">{(active.clip.tags ?? active.clip.analysis?.suggested_tags ?? []).map((tag) => <span key={tag} className="rounded bg-muted px-2 py-0.5">{tag}</span>)}</dd></div>
+          <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Description</dt><dd>{clipDescription(active.clip) || "No description"}</dd></div>
+          <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Tags</dt><dd className="flex flex-wrap gap-1">{clipTags(active.clip).map((tag) => <span key={tag} className="rounded bg-muted px-2 py-0.5">{tag}</span>)}</dd></div>
           <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Source</dt><dd>{active.clip.source || "Not specified"}</dd></div>
           <div><dt className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">Duration</dt><dd>{active.duration ? `${active.duration.toFixed(1)}s` : "Unavailable"}</dd></div>
         </dl>

@@ -1,4 +1,5 @@
 "use client";
+import { clipDescription, clipTags } from "@/lib/library-metadata";
 
 import { LibraryUpload } from "@/components/form/LibraryUpload";
 import { useEffect, useRef, useState } from "react";
@@ -58,8 +59,8 @@ export default function LibraryPage() {
     setEditingFilename(video.filename);
     setEditForm({
       date: video.date,
-      tags: video.tags || [],
-      description: video.description,
+      tags: clipTags(video),
+      description: clipDescription(video),
       source: video.source,
     });
   };
@@ -228,7 +229,7 @@ export default function LibraryPage() {
                           Description
                         </p>
                         <p className="text-sm text-foreground mt-1">
-                          {selectedVideo.description || "No description"}
+                          {clipDescription(selectedVideo) || "No description"}
                         </p>
                       </div>
 

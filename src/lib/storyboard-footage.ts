@@ -1,3 +1,4 @@
+import { clipDescription } from "@/lib/library-metadata";
 import { promises as fs } from "fs";
 import { join, sep } from "path";
 import { randomUUID } from "crypto";
@@ -69,7 +70,7 @@ export async function listStoryboardFootage(videoId: string): Promise<FootageCan
     const transcript = timed.length ? timed.map((segment) => segment.text).join(" ") : clip.analysis?.spoken_text ?? "";
     const segments: Segment[] = timed.length ? timed : clip.analysis && duration ? [{
       index: 0, start_time: 0, end_time: duration, start_word: null, end_word: null,
-      text: transcript, topic: clip.analysis.description || clip.filename, role: "demo", hook_score: 0,
+      text: transcript, topic: clipDescription(clip), role: "demo", hook_score: 0,
       standalone: true, on_screen_text_idea: "",
     }] : [];
     return { clip, duration, segments, transcript, timing: timed.length ? "saved_segments" : segments.length ? "whole_clip" : "unavailable", included: included.has(clip.filename) };

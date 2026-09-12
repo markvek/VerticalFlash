@@ -42,6 +42,10 @@ export async function POST(request: NextRequest) {
         ? body.minViews
         : 0;
 
+    if (!hashtagList.length && !keywordList.length && !competitorList.length) {
+      return NextResponse.json({ error: "Enter a hashtag, keyword, or competitor to search" }, { status: 400 });
+    }
+    const errors: Array<{ query: string; kind: string; message: string }> = [];
     // Run all scans in parallel for each category
     const [hashtagResults, keywordResults, competitorResults] =
       await Promise.all([
@@ -63,6 +67,7 @@ export async function POST(request: NextRequest) {
         hashtags.push(result.value.data);
         allHarvest.push(...result.value.harvest);
       } else {
+        errors.push({ query: hashtagList[index], kind: "hashtag", message: result.reason instanceof Error ? result.reason.message : "Search failed" });
         console.error(
           `Failed to scan hashtag "${hashtagList[index]}":`,
           result.reason
@@ -76,6 +81,7 @@ export async function POST(request: NextRequest) {
         keywords.push(result.value.data);
         allHarvest.push(...result.value.harvest);
       } else {
+        errors.push({ query: keywordList[index], kind: "keyword", message: result.reason instanceof Error ? result.reason.message : "Search failed" });
         console.error(
           `Failed to scan keyword "${keywordList[index]}":`,
           result.reason
@@ -89,6 +95,7 @@ export async function POST(request: NextRequest) {
         competitors.push(result.value.data);
         allHarvest.push(...result.value.harvest);
       } else {
+        errors.push({ query: competitorList[index], kind: "competitor", message: result.reason instanceof Error ? result.reason.message : "Search failed" });
         console.error(
           `Failed to scan competitor "${competitorList[index]}":`,
           result.reason
@@ -107,6 +114,7 @@ export async function POST(request: NextRequest) {
           minViews,
         });
       } catch (error) {
+        errors.push({ query: body.tiktokUrl ?? "discovery", kind: "discovery", message: error instanceof Error ? error.message : "Discovery failed" });
         console.error("Expansion failed:", error);
       }
     }
@@ -118,7 +126,11 @@ export async function POST(request: NextRequest) {
       ...(discovered ? { discovered } : {}),
     };
 
-    return NextResponse.json(scanResult);
+    const succeeded = hashtags.length + keywords.length + competitors.length;
+    if (errors.length && !succeeded) {
+      return NextResponse.json({ error: "Could not search. Retry the failed queries.", errors }, { status: 502 });
+    }
+    return NextResponse.json({ ...scanResult, status: errors.length ? "partial" : "complete", errors });
   } catch (error) {
     console.error("Scan API error:", error);
     return NextResponse.json(

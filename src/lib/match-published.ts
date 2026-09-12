@@ -19,6 +19,8 @@ export interface PublishedFacts {
 }
 
 export interface RenderCandidate {
+  exportId?: string;
+  publishId?: string;
   videoId: string;
   // The download filename (manifest.sourceVideo) — the /downloads/[filename] param
   filename: string;
@@ -34,6 +36,8 @@ export interface RenderCandidate {
 }
 
 export interface PublishedMatch {
+  exportId?: string;
+  publishId?: string;
   publishedId: string;
   videoId: string;
   filename: string;
@@ -163,10 +167,13 @@ export function matchPublished(
 
     const best = scored[0];
     if (!best || best.score < ACCEPT_SCORE) continue;
-    if (scored.length > 1 && best.score - scored[1].score < ACCEPT_MARGIN)
+    const runnerUp = scored.find(s => s.candidate.videoId !== best.candidate.videoId);
+    if (runnerUp && best.score - runnerUp.score < ACCEPT_MARGIN)
       continue;
 
     matches.push({
+      exportId: best.candidate.exportId,
+      publishId: best.candidate.publishId,
       publishedId: video.id,
       videoId: best.candidate.videoId,
       filename: best.candidate.filename,

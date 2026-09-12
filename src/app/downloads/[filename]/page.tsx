@@ -1,5 +1,8 @@
 "use client";
 
+import { VariationsPanel } from "@/components/form/VariationsPanel";
+import type { Variations } from "@/lib/variations-schema";
+
 import { intersects, previewTime, textIntersects } from "@/lib/playhead";
 import { playMedia } from "@/lib/media-playback";
 import { FramingEditor } from "@/components/form/FramingEditor";
@@ -161,6 +164,11 @@ const FILL_LABELS: Record<string, string> = {
 };
 
 interface RenderManifest {
+  issues?: Array<{ shot_index: number | null; message: string; fix: string }>;
+  exportId?: string;
+  stale?: boolean;
+  status?: "ready" | "preview_with_issues";
+  requestedOptions?: { audio: AudioMode; music_filename: string | null; burn_text: boolean };
   framing?: FramingDocument;
   videoId: string;
   renderedAt: string;
@@ -358,7 +366,7 @@ function VideoViewerContent() {
   const [playbackError, setPlaybackError] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(searchParams.get("planningError") ? `Project created; planning failed: ${searchParams.get("planningError")}. Retry planning in this editor.` : null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [selectedShot, setSelectedShot] = useState(0);
   const [playheadTime, setPlayheadTime] = useState(0);
@@ -373,7 +381,9 @@ function VideoViewerContent() {
   const [previewClip, setPreviewClip] = useState<ClipPreview | null>(null);
   const [allClipsOpen, setAllClipsOpen] = useState(false);
   const [trimmingShot, setTrimmingShot] = useState<number | null>(null);
-  type EditorView = "video" | "shots" | "clips" | "storyboards" | "render" | "captions" | "virality";
+  const [variations, setVariations] = useState<Variations | null>(null);
+  const [variationsError, setVariationsError] = useState<string | null>(null);
+  type EditorView = "variations" | "video" | "shots" | "clips" | "storyboards" | "render" | "captions" | "virality";
   const [panelTab, setPanelTabState] = useState<EditorView>("video");
   const setPanelTab = useCallback((tab: EditorView) => {
     setPanelTabState(tab);
@@ -382,9 +392,17 @@ function VideoViewerContent() {
     window.history.replaceState(null, "", url.toString());
   }, []);
   useEffect(() => {
-    const view = searchParams.get("view");
-    if (view && ["video", "shots", "clips", "storyboards", "render", "captions", "virality"].includes(view)) setPanelTabState(view as EditorView);
+    const view = searchParams.get("view") ?? searchParams.get("tab");
+    if (view && ["variations", "video", "shots", "clips", "storyboards", "render", "captions", "virality"].includes(view)) setPanelTabState(view as EditorView);
   }, [searchParams]);
+  useEffect(() => {
+    if (!videoId) return;
+    const controller = new AbortController();
+    fetch(`/api/analyze/${videoId}/variations`, { signal: controller.signal })
+      .then(async res => { if (res.status === 404) return null; const data = await res.json(); if (!res.ok) throw new Error(data.error || "Could not load suggestions"); return data; })
+      .then(setVariations).catch(e => { if (!controller.signal.aborted) setVariationsError(e.message); });
+    return () => controller.abort();
+  }, [videoId]);
   // Master projects open their saved storyboards once analysis has loaded.
   const tabParamApplied = useRef(false);
   const [loopShot, setLoopShot] = useState(false);
@@ -561,7 +579,7 @@ function VideoViewerContent() {
       const res = await fetch("/api/tiktok/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoId }),
+        body: JSON.stringify({ videoId, exportId: render?.exportId }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -573,7 +591,7 @@ function VideoViewerContent() {
       }
       setTiktokResult({
         ok: true,
-        message:
+        message: data.processing ? "TikTok is still processing. Check your TikTok inbox shortly." :
           "Sent to your TikTok inbox — open the TikTok app, find it in your notifications/drafts, add the caption and post.",
       });
     } catch (error) {
@@ -668,6 +686,7 @@ function VideoViewerContent() {
           setRender(data);
           // The last render's soundtrack is the starting point
           const manifest = data as RenderManifest;
+          if (manifest.requestedOptions) setBurnText(manifest.requestedOptions.burn_text);
           if (manifest.audio) {
             audioInitialized.current = true;
             setAudioMode(manifest.audio);
@@ -940,6 +959,16 @@ function VideoViewerContent() {
       })
       .catch(() => alert("Copying failed"));
   };
+
+  useEffect(() => {
+    if (!videoId || !render?.exportId || rendering) return;
+    const controller = new AbortController();
+    fetch(`/api/analyze/${videoId}/render`, { signal: controller.signal })
+      .then(async res => { if (!res.ok) throw new Error("Could not verify export"); return res.json(); })
+      .then(data => setRender(current => current && current.exportId === data.exportId ? { ...current, stale: data.stale } : current ? { ...current, stale: true } : current))
+      .catch(() => { if (!controller.signal.aborted) setRender(current => current ? { ...current, stale: true } : current); });
+    return () => controller.abort();
+  }, [videoId, render?.exportId, rendering, recs, editNotes, textOverlays, analysis, brollTrack, framing.document]);
 
   const handleRender = async () => {
     if (!videoId || rendering) return;
@@ -1311,14 +1340,15 @@ function VideoViewerContent() {
 
   const handleDownload = async () => {
     try {
-      const response = await fetch(`/api/downloads/${encodeURIComponent(filename)}`);
-      if (!response.ok) throw new Error("Download failed");
+      if (!render || renderStale) throw new Error("Your latest changes have not been exported");
+      const response = await fetch(`/api/renders/${videoId}?download=1&exportId=${encodeURIComponent(render.exportId ?? "")}`);
+      if (!response.ok) throw new Error((await response.json()).error || "Download failed");
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = filename;
+      a.download = `export-${videoId}-${render.exportId ?? "latest"}.mp4`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1639,7 +1669,12 @@ function VideoViewerContent() {
 
   const renderStale =
     !!render &&
-    (((framing.document?.revision ?? 0) !== (render.framing?.revision ?? 0)) ||
+    (render.stale === true || !render.requestedOptions ||
+      render.requestedOptions.audio !== audioMode ||
+      render.requestedOptions.music_filename !== (audioMode === "music" ? musicFilename : null) ||
+      render.requestedOptions.burn_text !== burnText ||
+      textSaving || noteSaving || Object.keys(textDrafts).length > 0 || Object.keys(instructionDrafts).length > 0 ||
+      ((framing.document?.revision ?? 0) !== (render.framing?.revision ?? 0)) ||
       framing.status === "Unsaved" || framing.status === "Saving" || framing.status === "Not saved" ||
       (!!analysis?.shotsEditedAt &&
       new Date(render.renderedAt).getTime() < new Date(analysis.shotsEditedAt).getTime()) ||
@@ -2043,7 +2078,7 @@ function VideoViewerContent() {
         Shots
       </button>
       <button onClick={() => setPanelTab("clips")} className={tabClass("clips")}>
-        B-Roll Clips
+        Replace shot
       </button>
       {project?.kind === "master" && (
         <button
@@ -2053,6 +2088,7 @@ function VideoViewerContent() {
           Storyboards
         </button>
       )}
+      <button onClick={() => setPanelTab("variations")} className={tabClass("variations")}>Suggestions</button>
       <button onClick={() => setPanelTab("virality")} className={tabClass("virality")}>
         Virality Review
       </button>
@@ -2063,7 +2099,7 @@ function VideoViewerContent() {
         onClick={() => setPanelTab("captions")}
         className={tabClass("captions")}
       >
-        Captions
+        Post caption &amp; hashtags
       </button>
     </div>
   );
@@ -2648,6 +2684,7 @@ function VideoViewerContent() {
                     </div>
                   ))}
 
+                {panelTab === "variations" && (variations ? <VariationsPanel filename={filename} videoId={videoId!} variations={variations} editNotes={editNotes} canRender={!!recs} rendering={rendering} onVariations={setVariations} onEditNotes={setEditNotes} onRender={handleRender} /> : <p>{variationsError ?? "No suggestions saved. Use Iterate on a top video to generate suggestions."}</p>)}
                 {panelTab === "virality" && videoId && <ViralityReviewPanel videoId={videoId} storyboardId={searchParams.get("storyboard") ?? undefined} onSeek={project?.kind === "master" ? seekTo : undefined} />}
                 {panelTab === "storyboards" &&
                   project?.kind === "master" &&
@@ -2667,6 +2704,10 @@ function VideoViewerContent() {
                     {render && (
                     <div className="rounded-lg border border-border p-3 flex flex-col gap-2">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <p className="text-xs font-bold text-foreground uppercase tracking-wide">
+                          Export {render.exportId?.slice(0, 8) ?? "legacy"}
+                        </p>
+                        <button onClick={handleDownload} disabled={renderStale || render.status !== "ready" || rendering} className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold disabled:opacity-60">Download MP4</button>
                         <p className="text-xs font-bold text-foreground uppercase tracking-wide">
                           📱 Send to TikTok drafts
                         </p>
@@ -2731,7 +2772,7 @@ function VideoViewerContent() {
                           )}
                           <button
                             onClick={handleTiktokUpload}
-                            disabled={tiktokUploading || rendering}
+                            disabled={tiktokUploading || rendering || renderStale || render.status !== "ready"}
                             className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold disabled:opacity-60"
                           >
                             {tiktokUploading
@@ -2756,6 +2797,7 @@ function VideoViewerContent() {
                     </div>
                     )}
 
+                    {!!render?.issues?.length && <div role="alert" className="text-amber-600">Preview with issues{render.issues.map((issue, i) => <p key={i}>{issue.shot_index != null ? `Shot ${issue.shot_index + 1}: ` : ""}{issue.fix}</p>)}</div>}
                     {render && render.warnings.length > 0 && (
                       <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-2 flex flex-col gap-0.5">
                         {render.warnings.map((w, i) => (
@@ -2778,7 +2820,7 @@ function VideoViewerContent() {
                     {renderStale && (
                       <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-2">
                         <p className="text-[11px] text-yellow-700 dark:text-yellow-400">
-                          Shot times changed after this render — render again to apply them.
+                          Your latest changes have not been exported — render again to apply them.
                         </p>
                       </div>
                     )}
@@ -2791,7 +2833,7 @@ function VideoViewerContent() {
                   <div className="rounded-lg border border-border p-3 flex flex-col gap-3">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <p className="text-xs font-bold text-foreground uppercase tracking-wide">
-                        Render output · {render.durationSeconds.toFixed(1)}s
+                        {renderStale ? "Your latest changes have not been exported" : render.status === "ready" ? "Ready to download or upload" : "Preview with issues"} · {render.durationSeconds.toFixed(1)}s
                         {render.broll?.length
                           ? ` · ${render.broll.length} B-roll segment${render.broll.length === 1 ? "" : "s"}`
                           : ""}

@@ -1,9 +1,11 @@
+import { projectModel } from "@/lib/models/native";
+import { clipDescription, clipTags } from "@/lib/library-metadata";
 import { NextRequest, NextResponse } from "next/server";
 import { getBrandConfig } from "@/lib/config";
 import { loadLibrary } from "@/lib/library-store";
 import { promises as fs } from "fs";
 import { join, basename } from "path";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel } from "@/lib/gemini";
 import { AnalysisZ, type Analysis } from "@/lib/analysis-schema";
 import {
   EDIT_INTENTS,
@@ -71,28 +73,24 @@ async function loadAnalysis(videoId: string): Promise<Analysis | null> {
 
 // Only clips that have been through Gemini analysis are matchable
 async function loadCatalog(): Promise<CatalogClip[]> {
-  try {
-    const library = await loadLibrary();
-    return library.videos
-      .filter((v) => v.analysis)
-      .map((v) => ({
-        filename: v.filename,
-        duration: v.duration ?? null,
-        category: v.analysis!.category,
-        camera_action: v.analysis!.camera_action,
-        location: v.analysis!.location,
-        time_of_day: v.analysis!.time_of_day,
-        product_present: v.analysis!.product_present,
-        description: v.analysis!.description,
-        tags: Array.from(
-          new Set(
-            [...(v.tags || []), ...v.analysis!.suggested_tags].map(normalizeTag)
-          )
-        ),
-      }));
-  } catch {
-    return [];
-  }
+  const library = await loadLibrary();
+  return library.videos
+    .filter((v) => v.analysis)
+    .map((v) => ({
+      filename: v.filename,
+      duration: v.duration ?? null,
+      category: v.analysis!.category,
+      camera_action: v.analysis!.camera_action,
+      location: v.analysis!.location,
+      time_of_day: v.analysis!.time_of_day,
+      product_present: v.analysis!.product_present,
+      description: clipDescription(v),
+      tags: Array.from(
+        new Set(
+          clipTags(v).map(normalizeTag)
+        )
+      ),
+    }));
 }
 
 function normalizeTag(tag: string): string {
@@ -259,7 +257,7 @@ async function generateMatches(
           }). Return ONLY valid JSON matching the provided schema.`;
 
     const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       contents: createUserContent([prompt]),
       config: {
         responseMimeType: "application/json",
@@ -524,7 +522,9 @@ export async function POST(
     );
   }
 
-  const catalog = await loadCatalog();
+  let catalog: CatalogClip[];
+  try { catalog = await loadCatalog(); }
+  catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Could not load clip catalog" }, { status: 500 }); }
   if (catalog.length === 0) {
     return NextResponse.json(
       {
@@ -537,7 +537,7 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Gemini not configured" },
@@ -702,7 +702,7 @@ export async function POST(
     const stored: ShotRecommendations = {
       videoId,
       generatedAt: new Date().toISOString(),
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       clipsConsidered: catalog.length,
       shots,
       usage: {

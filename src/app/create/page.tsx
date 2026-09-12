@@ -82,16 +82,17 @@ function CreateForm() {
           ? "Planning shots to the track with Gemini… (can take a minute)"
           : "Planning shots with Gemini… (can take a minute)"
       );
+      let planningError: string | null = null;
       try {
         const planRes = await fetch(`/api/analyze/${videoId}`, { method: "POST" });
         if (!planRes.ok) {
           const planData = await planRes.json().catch(() => null);
-          console.error("shot plan failed:", planData?.error);
+          planningError = planData?.error || "Planning failed";
         }
       } catch (planError) {
-        console.error("shot plan failed:", planError);
+        planningError = planError instanceof Error ? planError.message : "Planning failed";
       }
-      router.push(`/downloads/${encodeURIComponent(filename)}`);
+      router.push(`/downloads/${encodeURIComponent(filename)}${planningError ? `?planningError=${encodeURIComponent(planningError)}` : ""}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create the project");
       setStatus(null);
