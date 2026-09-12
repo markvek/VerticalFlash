@@ -6,6 +6,7 @@ export const SIDECAR_KINDS = [
   "framing",
   "broll",
   "model-selection",
+  "export-options",
   "recommendations",
   "generation",
   "edit-notes",

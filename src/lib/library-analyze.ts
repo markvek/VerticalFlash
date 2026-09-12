@@ -12,7 +12,7 @@ import {
   type ClipGeminiAnalysis,
   type LibraryClip,
 } from "./library-schema";
-import { findLibraryFile, loadLibrary, saveLibrary } from "./library-store";
+import { findLibraryFile, loadLibrary, saveLibrary, withLibraryLock } from "./library-store";
 
 export { classifyGeminiError, type GeminiErrorKind } from "./gemini";
 export { findLibraryFile, loadLibrary } from "./library-store";
@@ -191,6 +191,7 @@ export async function analyzeLibraryClip(
     );
 
     // Auto-save: merge into .metadata.json (user tags are kept, deduped)
+    return await withLibraryLock(async () => {
     const library = await loadLibrary();
     const now = new Date().toISOString();
     const existingIndex = library.videos.findIndex(
@@ -204,14 +205,15 @@ export async function analyzeLibraryClip(
     );
 
     const updated: LibraryClip = {
+      ...existing,
       filename,
       createdAt: existing?.createdAt || now,
       source: existing?.source ?? null,
       // ffprobe wins only when the user hasn't set a value
-      date: existing?.date || creationTime,
+      date: existing && "date" in existing ? existing.date : creationTime,
       duration: existing?.duration ?? duration,
-      description: existing?.description || analysis.description,
-      tags: mergedTags,
+      description: existing?.description ?? analysis.description,
+      tags: existing?.corrections?.tags ?? mergedTags.filter(t => !existing?.rejectedTags?.includes(t.toLowerCase())),
       analysis: {
         ...analysis,
         analyzedAt: now,
@@ -231,6 +233,7 @@ export async function analyzeLibraryClip(
     await saveLibrary(library);
 
     return { updated, usage };
+    });
   } finally {
     if (uploadedName) {
       try {

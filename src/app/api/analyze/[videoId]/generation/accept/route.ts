@@ -10,7 +10,7 @@ import {
 import { generatedClipDir } from "@/lib/generation-schema";
 import {
   loadGenerations,
-  saveGenerations,
+  mutateGenerations,
 } from "@/lib/generation-store";
 import { shotDurationSeconds } from "@/lib/generation-prompts";
 import { ANALYSIS_DIR } from "@/lib/paths";
@@ -155,7 +155,7 @@ export async function POST(
     JSON.stringify(ShotRecommendationsZ.parse(recs), null, 2)
   );
   await fs.rename(tmp, path);
-  await saveGenerations(generations);
+  const latest = await mutateGenerations(videoId, current => { current.shots[String(shotIndex)].accepted_file = attempt.file; });
 
-  return NextResponse.json({ generation: generations, recommendations: recs });
+  return NextResponse.json({ generation: latest, recommendations: recs });
 }

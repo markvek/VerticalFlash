@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { NextRequest, NextResponse } from "next/server";
 import {
   scanHashtag,
@@ -12,14 +13,10 @@ import {
 } from "@/lib/tikhub";
 import { buildDiscovery } from "@/lib/expand";
 
-interface ScanRequest {
-  tiktokUrl?: string;
-  hashtags?: string;
-  keywords?: string;
-  competitors?: string;
-  expand?: boolean;
-  minViews?: number;
-}
+const ScanRequestZ = z.object({
+  tiktokUrl: z.string().optional(), hashtags: z.string().optional(), keywords: z.string().optional(),
+  competitors: z.string().optional(), expand: z.boolean().optional(), minViews: z.number().nonnegative().optional(),
+});
 
 function parseCommaSeparated(value: string | undefined): string[] {
   if (!value || !value.trim()) return [];
@@ -31,11 +28,12 @@ function parseCommaSeparated(value: string | undefined): string[] {
 
 export async function POST(request: NextRequest) {
   try {
-    const body: ScanRequest = await request.json();
+    const body = ScanRequestZ.parse(await request.json());
 
     const hashtagList = parseCommaSeparated(body.hashtags);
     const keywordList = parseCommaSeparated(body.keywords);
     const competitorList = parseCommaSeparated(body.competitors);
+    if (!hashtagList.length && !keywordList.length && !competitorList.length && !body.tiktokUrl?.trim()) return NextResponse.json({ error: "Enter a hashtag, keyword, account, or TikTok URL to search." }, { status: 400 });
 
     const minViews =
       typeof body.minViews === "number" && body.minViews > 0
@@ -56,6 +54,7 @@ export async function POST(request: NextRequest) {
 
     // Extract successful results, pool their harvests, and log errors
     const allHarvest: HarvestedVideo[] = [];
+    const errors: string[] = [];
 
     const hashtags: HashtagData[] = [];
     hashtagResults.forEach((result, index) => {
@@ -63,6 +62,7 @@ export async function POST(request: NextRequest) {
         hashtags.push(result.value.data);
         allHarvest.push(...result.value.harvest);
       } else {
+        errors.push(`Could not search hashtag ${hashtagList[index]}. Check the TikHub connection and retry.`);
         console.error(
           `Failed to scan hashtag "${hashtagList[index]}":`,
           result.reason
@@ -76,6 +76,7 @@ export async function POST(request: NextRequest) {
         keywords.push(result.value.data);
         allHarvest.push(...result.value.harvest);
       } else {
+        errors.push(`Could not search keyword ${keywordList[index]}. Check the TikHub connection and retry.`);
         console.error(
           `Failed to scan keyword "${keywordList[index]}":`,
           result.reason
@@ -89,6 +90,7 @@ export async function POST(request: NextRequest) {
         competitors.push(result.value.data);
         allHarvest.push(...result.value.harvest);
       } else {
+        errors.push(`Could not search account ${competitorList[index]}. Check the TikHub connection and retry.`);
         console.error(
           `Failed to scan competitor "${competitorList[index]}":`,
           result.reason
@@ -107,6 +109,7 @@ export async function POST(request: NextRequest) {
           minViews,
         });
       } catch (error) {
+        errors.push("Related-topic discovery failed; showing available search results.");
         console.error("Expansion failed:", error);
       }
     }
@@ -118,8 +121,10 @@ export async function POST(request: NextRequest) {
       ...(discovered ? { discovered } : {}),
     };
 
-    return NextResponse.json(scanResult);
+    if (errors.length && !hashtags.length && !keywords.length && !competitors.length) return NextResponse.json({ error: errors.join(" "), errors }, { status: 502 });
+    return NextResponse.json({ ...scanResult, errors });
   } catch (error) {
+    if (error instanceof z.ZodError || error instanceof SyntaxError) return NextResponse.json({ error: "Invalid search inputs" }, { status: 400 });
     console.error("Scan API error:", error);
     return NextResponse.json(
       { error: "Failed to perform niche scan" },

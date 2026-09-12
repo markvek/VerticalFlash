@@ -21,7 +21,8 @@
     "test:benchmarks": "node --import tsx --test scripts/benchmark-store.test.ts",
     "lint": "eslint .",
     "analyze:library": "node --env-file-if-exists=.env.local --import tsx scripts/analyze-library-batch.ts",
-    "test:storyboard-benchmarks": "node --import tsx --test scripts/model-providers.test.ts scripts/storyboard-benchmark.test.ts"
+    "test:storyboard-benchmarks": "node --import tsx --test scripts/model-providers.test.ts scripts/storyboard-benchmark.test.ts",
+    "test": "node --import tsx --test scripts/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.17.1",

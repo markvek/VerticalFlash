@@ -1,3 +1,4 @@
+import { assertAnalysisReplaceable } from "./analysis-replacement";
 import { promises as fs } from "fs";
 import { createPartFromUri, createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
@@ -521,6 +522,7 @@ export async function analyzeAndStoreMaster(
   project: MasterProjectMeta,
   duration: number
 ): Promise<Analysis> {
+  await assertAnalysisReplaceable(videoId);
   await fs.mkdir(ANALYSIS_DIR, { recursive: true });
   const { analysis, shots, segments } = await analyzeMaster(ai, videoPath, videoId, project, duration);
   await extractScreenshots(videoPath, videoId, shots, duration);
@@ -534,7 +536,7 @@ export async function analyzeAndStoreMaster(
     tags: analysis.tags,
     music: { title: "", author: "", usage: analysis.music_usage, usage_note: analysis.music_usage_note },
     full_transcript: analysis.full_transcript,
-    shots: shots.map((shot, index) => ({ ...shot, index, screenshot: `/api/analysis-shot/${videoId}/${index}` })),
+    shots: shots.map((shot, index) => ({ ...shot, id: `${videoId}:${segments.analyzedAt}:${index}`, index, screenshot: `/api/analysis-shot/${videoId}/${index}` })),
     usage: segments.usage,
   };
   const path = analysisPath(videoId);

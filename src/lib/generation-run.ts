@@ -1,15 +1,14 @@
+import { beginActivity, finishActivity } from "./workflow-activity";
 import { NextResponse } from "next/server";
 import { ffmpegErrorResponse } from "./ffmpeg";
 import { GEMINI_VIDEO_MODEL } from "./gemini";
 import { classifyGeminiError } from "./library-analyze";
 import {
-  loadGenerations,
-  saveGenerations,
+  mutateGenerations,
   getOrCreateShot,
 } from "./generation-store";
 import type { ShotGenerations } from "./generation-schema";
 import {
-  runGeneration,
   type RunGenerationResult,
 } from "./generate-clip";
 
@@ -64,16 +63,16 @@ export async function executeGenerationAttempt(
   }
   inFlight.add(key);
   try {
-    let generations = await loadGenerations(spec.videoId);
-    let shot = getOrCreateShot(generations, spec.shotIndex);
-    if (shot.status === "generating") {
-      return { busy: true };
-    }
-    const attemptNumber = shot.attempts.length + 1;
-    shot.status = "generating";
-    shot.startedAt = new Date().toISOString();
-    await saveGenerations(generations);
+    let attemptNumber = 0;
+    await mutateGenerations(spec.videoId, generations => {
+      const shot = getOrCreateShot(generations, spec.shotIndex);
+      if (shot.status === "generating") return;
+      attemptNumber = shot.attempts.length + 1;
+      shot.status = "generating"; shot.startedAt = new Date().toISOString();
+    });
 
+    if (!attemptNumber) return { busy: true };
+    const activity = await beginActivity(spec.videoId, `${spec.kind === "generate" ? "Generate" : "Extend"} clip ${spec.shotIndex + 1}`);
     let result: RunGenerationResult | null = null;
     let failure: unknown = null;
     try {
@@ -83,8 +82,8 @@ export async function executeGenerationAttempt(
     }
 
     // Re-load in case the user edited the prompt while generating
-    generations = await loadGenerations(spec.videoId);
-    shot = getOrCreateShot(generations, spec.shotIndex);
+    const generations = await mutateGenerations(spec.videoId, current => {
+    const shot = getOrCreateShot(current, spec.shotIndex);
     shot.attempts.push({
       attempt: attemptNumber,
       kind: spec.kind,
@@ -108,8 +107,9 @@ export async function executeGenerationAttempt(
     });
     shot.status = result ? "ready" : "failed";
     shot.startedAt = null;
-    await saveGenerations(generations);
+    });
 
+    if (activity) await finishActivity(activity, failure == null ? null : failure instanceof Error ? failure.message : String(failure));
     if (failure != null) throw failure;
     return { generations };
   } finally {

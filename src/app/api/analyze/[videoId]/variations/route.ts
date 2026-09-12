@@ -1,3 +1,4 @@
+import { trackedRoute } from "@/lib/tracked-route";
 import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
@@ -83,7 +84,7 @@ export async function GET(
 
 // Generate (or regenerate) suggestions. Body: { source } with the published
 // post's stats — optional when a previous run already stored them.
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -222,3 +223,5 @@ export async function PATCH(
   await saveVariations(stored);
   return NextResponse.json(stored);
 }
+
+export const POST = trackedRoute("Suggest alternatives", handlePost);

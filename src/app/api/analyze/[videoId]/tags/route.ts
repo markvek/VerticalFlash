@@ -1,3 +1,4 @@
+import { trackedRoute } from "@/lib/tracked-route";
 import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
@@ -157,7 +158,7 @@ function normalizeTags(tags: string[]): string[] {
   ).slice(0, MAX_TAGS_PER_SHOT);
 }
 
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -244,3 +245,5 @@ export async function POST(
     );
   }
 }
+
+export const POST = trackedRoute("Tag shots", handlePost);

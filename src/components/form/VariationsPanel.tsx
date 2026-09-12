@@ -31,7 +31,7 @@ const KIND_LABELS: Record<VariationKind, { label: string; className: string }> =
   };
 
 // Fix notes go through /edit-notes, which caps a note at 500 characters
-const MAX_NOTE = 500;
+const MAX_NOTE = 2000;
 
 // Applying a second suggestion to the same shot appends rather than
 // clobbering the first; if the pair won't fit, the newest note wins

@@ -64,7 +64,7 @@ function ResultsContent() {
         });
 
         if (!response.ok) {
-          throw new Error("Failed to fetch scan results");
+          throw new Error((await response.json()).error || "Could not search TikTok. Check the connection and retry.");
         }
 
         const result: ScanResult = await response.json();
@@ -140,7 +140,7 @@ function ResultsContent() {
             </div>
           )}
 
-          {!loading && !error && data && <ScanResults data={data} />}
+          {!loading && !error && data && <>{data.errors?.map((message, i) => <p key={i} role="alert" className="mb-3 text-sm text-amber-600">{message}</p>)}<ScanResults data={data} /></>}
         </div>
       </div>
 

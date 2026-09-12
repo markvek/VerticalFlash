@@ -1,4 +1,7 @@
 "use client";
+import { WorkflowActivity } from "@/components/form/WorkflowActivity";
+import { VariationsPanel } from "@/components/form/VariationsPanel";
+import type { Variations } from "@/lib/variations-schema";
 
 import { intersects, previewTime, textIntersects } from "@/lib/playhead";
 import { playMedia } from "@/lib/media-playback";
@@ -11,6 +14,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { ViralityReviewPanel } from "@/components/form/ViralityReviewPanel";
 import {
   GEMINI_PRICE_IN_PER_M,
+  GEMINI_PRICING_MODEL,
   GEMINI_PRICE_OUT_PER_M,
 } from "@/lib/gemini-pricing";
 import { DEFAULT_TEXT_STYLE, type TextOverlays as TextOverlaysData, type ShotOverlay } from "@/lib/text-overlays-schema";
@@ -24,7 +28,7 @@ import {
 } from "@/components/form/GenerationPanel";
 import { extractVideoId } from "@/lib/video-id";
 import { MusicPicker } from "@/components/form/MusicPicker";
-import { StoryboardPanel } from "@/components/form/StoryboardPanel";
+import { StoryboardPreviewPanel } from "@/components/form/StoryboardPreviewPanel";
 import { ShotTimeline, type TimelineBroll, type TimelineResize } from "@/components/data/ShotTimeline";
 import { BrollSegmentPopover } from "@/components/form/BrollSegmentPopover";
 import type { BrollAnchor, BrollSegment, BrollTrack } from "@/lib/broll-schema";
@@ -161,6 +165,11 @@ const FILL_LABELS: Record<string, string> = {
 };
 
 interface RenderManifest {
+  exportId?: string;
+  requested?: { audio: AudioMode; music_filename: string | null; burn_text: boolean };
+  readiness?: "ready" | "issues";
+  issues?: string[];
+  state?: { stale: boolean; ready: boolean; issues: string[] };
   framing?: FramingDocument;
   videoId: string;
   renderedAt: string;
@@ -331,14 +340,15 @@ const timingLabel = (engine: "whisperx" | "gemini" | null | undefined) =>
 // the client bundle doesn't pull that module's @google/genai import)
 const isGeneratedClip = (f: string) => /^gen_s\d+_a\d+\.mp4$/.test(f);
 
-function formatCost(usage?: Analysis["usage"]): string | null {
+function formatCost(usage?: Analysis["usage"], model?: string): string | null {
   if (!usage || usage.promptTokens === undefined) return null;
+  if (model !== GEMINI_PRICING_MODEL) return "Cost estimate unavailable for this model";
   const cost =
     ((usage.promptTokens ?? 0) * GEMINI_PRICE_IN_PER_M +
       (usage.outputTokens ?? 0) * GEMINI_PRICE_OUT_PER_M) /
     1_000_000;
-  if (cost < 0.005) return "$0.00 (effectively free)";
-  return `$${cost.toFixed(2)}`;
+  if (cost < 0.005) return "estimated under $0.01";
+  return `estimated $${cost.toFixed(2)}`;
 }
 
 // "0:04.2"-style clock for the shot cards
@@ -361,6 +371,19 @@ function VideoViewerContent() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [selectedShot, setSelectedShot] = useState(0);
+  const [exportOptionsLoaded, setExportOptionsLoaded] = useState(false);
+  const [exportOptionsError, setExportOptionsError] = useState<string | null>(null);
+  const [exportOptionsSaving, setExportOptionsSaving] = useState(false);
+  const exportOptionsSaved = useRef<string | undefined>(undefined);
+  const exportOptionsQueue = useRef<Promise<void>>(Promise.resolve());
+  const persistExportOptions = useCallback((value: string) => {
+    const next = exportOptionsQueue.current.catch(() => {}).then(async () => {
+      const response = await fetch(`/api/analyze/${videoId}/export-options`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: value });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+    });
+    exportOptionsQueue.current = next;
+    return next;
+  }, [videoId]);
   const [playheadTime, setPlayheadTime] = useState(0);
   const [recs, setRecs] = useState<ShotRecommendations | null>(null);
   const [generation, setGeneration] = useState<ShotGenerationsData | null>(
@@ -373,7 +396,7 @@ function VideoViewerContent() {
   const [previewClip, setPreviewClip] = useState<ClipPreview | null>(null);
   const [allClipsOpen, setAllClipsOpen] = useState(false);
   const [trimmingShot, setTrimmingShot] = useState<number | null>(null);
-  type EditorView = "video" | "shots" | "clips" | "storyboards" | "render" | "captions" | "virality";
+  type EditorView = "variations" | "video" | "shots" | "clips" | "storyboards" | "render" | "captions" | "virality";
   const [panelTab, setPanelTabState] = useState<EditorView>("video");
   const setPanelTab = useCallback((tab: EditorView) => {
     setPanelTabState(tab);
@@ -382,13 +405,14 @@ function VideoViewerContent() {
     window.history.replaceState(null, "", url.toString());
   }, []);
   useEffect(() => {
-    const view = searchParams.get("view");
-    if (view && ["video", "shots", "clips", "storyboards", "render", "captions", "virality"].includes(view)) setPanelTabState(view as EditorView);
+    const view = searchParams.get("view") ?? (searchParams.get("tab") === "variations" ? "variations" : null);
+    if (view && ["video", "shots", "clips", "storyboards", "render", "captions", "virality", "variations"].includes(view)) setPanelTabState(view as EditorView);
   }, [searchParams]);
   // Master projects open their saved storyboards once analysis has loaded.
   const tabParamApplied = useRef(false);
   const [loopShot, setLoopShot] = useState(false);
   const [render, setRender] = useState<RenderManifest | null>(null);
+  const [exportStatus, setExportStatus] = useState<RenderManifest["state"] | null>(null);
   const [rendering, setRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
   // Soundtrack choice for the next render: defaults to the project's song
@@ -409,6 +433,8 @@ function VideoViewerContent() {
   const editingPanelRef = useRef<HTMLElement>(null);
   const textSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const textSaveError = useRef<string | null>(null);
+  const [variations, setVariations] = useState<Variations | null>(null);
+  const [variationError, setVariationError] = useState<string | null>(null);
   const [captions, setCaptions] = useState<CaptionsData | null>(null);
   const [captionsLoading, setCaptionsLoading] = useState(false);
   const [captionsError, setCaptionsError] = useState<string | null>(null);
@@ -553,6 +579,16 @@ function VideoViewerContent() {
     setTiktokResult(null);
   };
 
+  const checkTiktokUpload = useCallback(async (refresh = false) => {
+    if (!videoId) return;
+    try {
+      const response = await fetch(`/api/tiktok/upload?videoId=${encodeURIComponent(videoId)}${refresh ? "&refresh=1" : ""}`);
+      const data = await response.json(); if (!response.ok) throw new Error(data.error);
+      if (data.latest) setTiktokResult({ ok: data.latest.status !== "FAILED", message: data.latest.status === "PUBLISH_COMPLETE" ? "TikTok confirms publication." : data.latest.status === "SEND_TO_USER_INBOX" ? "Delivered to your TikTok inbox. Open TikTok to finish posting." : data.latest.status === "FAILED" ? "TikTok processing failed. Review your export before trying another upload." : "TikTok is still processing the upload. Check delivery status before uploading again." });
+    } catch (e) { setTiktokResult({ ok: false, message: e instanceof Error ? e.message : "Could not check upload status" }); }
+  }, [videoId]);
+  useEffect(() => { void checkTiktokUpload(); }, [checkTiktokUpload]);
+
   const handleTiktokUpload = async () => {
     if (!videoId || tiktokUploading) return;
     setTiktokUploading(true);
@@ -561,7 +597,7 @@ function VideoViewerContent() {
       const res = await fetch("/api/tiktok/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoId }),
+        body: JSON.stringify({ videoId, exportId: render?.exportId }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -573,8 +609,9 @@ function VideoViewerContent() {
       }
       setTiktokResult({
         ok: true,
-        message:
-          "Sent to your TikTok inbox — open the TikTok app, find it in your notifications/drafts, add the caption and post.",
+        message: data.status === "PUBLISH_COMPLETE" ? "TikTok confirms publication." : data.status === "SEND_TO_USER_INBOX"
+          ? "Delivered to your TikTok inbox. Open TikTok, add your post caption, and publish when ready."
+          : "Upload received. TikTok is still processing; delivery to your inbox is not confirmed yet.",
       });
     } catch (error) {
       setTiktokResult({
@@ -636,6 +673,11 @@ function VideoViewerContent() {
     }
   };
 
+  useEffect(() => {
+    const issue = searchParams.get("planning_error");
+    if (issue) setAnalysisError(`Project created, but shot planning failed: ${issue}. Use Plan shots to retry.`);
+  }, [searchParams]);
+
   // Load a previously saved analysis + clip recommendations, if any
   useEffect(() => {
     if (!videoId) return;
@@ -655,29 +697,30 @@ function VideoViewerContent() {
         if (!cancelled && data) setRecs(data);
       })
       .catch(() => {});
+    fetch(`/api/analyze/${videoId}/variations`).then(async res => {
+      if (res.status === 404) return null;
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || "Could not load suggestions"); return data;
+    }).then(data => { if (!cancelled) setVariations(data); }).catch(e => { if (!cancelled) setVariationError(e.message); });
     fetch(`/api/analyze/${videoId}/generation`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!cancelled && data) setGeneration(data);
       })
       .catch(() => {});
-    fetch(`/api/analyze/${videoId}/render`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!cancelled && data) {
-          setRender(data);
-          // The last render's soundtrack is the starting point
-          const manifest = data as RenderManifest;
-          if (manifest.audio) {
-            audioInitialized.current = true;
-            setAudioMode(manifest.audio);
-            if (manifest.music?.filename) {
-              setMusicFilename(manifest.music.filename);
-            }
-          }
-        }
-      })
-      .catch(() => {});
+    Promise.all([
+      fetch(`/api/analyze/${videoId}/render`).then(res => res.ok ? res.json() : null),
+      fetch(`/api/analyze/${videoId}/export-options`).then(async res => { if (res.status === 404) return null; const data = await res.json(); if (!res.ok) throw new Error(data.error); return data; }),
+    ]).then(([data, options]) => {
+      if (cancelled) return;
+      if (data) setRender(data);
+      const saved = options ?? data?.requested;
+      if (saved) {
+        audioInitialized.current = true;
+        setAudioMode(saved.audio); setBurnText(saved.burn_text); setMusicFilename(saved.music_filename);
+        if (options) exportOptionsSaved.current = JSON.stringify(options);
+      }
+      setExportOptionsLoaded(true);
+    }).catch(e => { if (!cancelled) setExportOptionsError(e.message); });
     fetch(`/api/analyze/${videoId}/edit-notes`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -703,6 +746,21 @@ function VideoViewerContent() {
       cancelled = true;
     };
   }, [videoId]);
+
+  useEffect(() => {
+    if (!videoId || !exportOptionsLoaded) return;
+    const value = JSON.stringify({ audio: audioMode, music_filename: musicFilename, burn_text: burnText });
+    let cancelled = false;
+    setExportOptionsSaving(true);
+    const timer = setTimeout(async () => {
+      try {
+        await persistExportOptions(value);
+        if (!cancelled) { exportOptionsSaved.current = value; setExportOptionsError(null); }
+      } catch (e) { if (!cancelled) setExportOptionsError(e instanceof Error ? e.message : "Export settings could not be saved"); }
+      finally { if (!cancelled) setExportOptionsSaving(false); }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [videoId, exportOptionsLoaded, audioMode, musicFilename, burnText, persistExportOptions]);
 
   // Keep the selected shot's column centered in the timeline (scroll only
   // the strip itself — scrollIntoView would also drag the page's scroll)
@@ -947,9 +1005,20 @@ function VideoViewerContent() {
     setRenderError(null);
     setPanelTab("render");
     try {
+      for (const [index, entry] of Object.entries(textDrafts)) {
+        await patchTextOverlays({ ...entry, shot_index: Number(index) });
+        if (textSaveError.current) throw new Error(textSaveError.current);
+      }
+      for (const [index, note] of Object.entries(instructionDrafts)) {
+        if (!(await saveNote(Number(index), note))) throw new Error("Save clip instructions before rendering.");
+      }
       await textSaveQueue.current;
       if (textSaveError.current) throw new Error(`Save text changes before rendering: ${textSaveError.current}`);
       await framing.flush();
+      const options = { audio: audioMode, music_filename: musicFilename, burn_text: burnText };
+      await persistExportOptions(JSON.stringify(options));
+      setExportOptionsError(null);
+      exportOptionsSaved.current = JSON.stringify(options);
       const res = await fetch(`/api/analyze/${videoId}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1309,26 +1378,8 @@ function VideoViewerContent() {
     }
   };
 
-  const handleDownload = async () => {
-    try {
-      const response = await fetch(`/api/downloads/${encodeURIComponent(filename)}`);
-      if (!response.ok) throw new Error("Download failed");
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      alert(`Download failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  };
-
-  const cost = formatCost(analysis?.usage);
+  const cost = formatCost(analysis?.usage, analysis?.model);
   const shot = analysis?.shots[selectedShot];
   const recsByShot = new Map(
     (recs?.shots || []).map((s) => [s.shot_index, s.recommendations])
@@ -1637,14 +1688,34 @@ function VideoViewerContent() {
         }
       : null;
 
-  const renderStale =
-    !!render &&
-    (((framing.document?.revision ?? 0) !== (render.framing?.revision ?? 0)) ||
-      framing.status === "Unsaved" || framing.status === "Saving" || framing.status === "Not saved" ||
-      (!!analysis?.shotsEditedAt &&
-      new Date(render.renderedAt).getTime() < new Date(analysis.shotsEditedAt).getTime()) ||
-      (!!brollTrack &&
-        new Date(render.renderedAt).getTime() < new Date(brollTrack.updatedAt).getTime()));
+  const exportInputKey = JSON.stringify([analysis, recs, editNotes, textOverlays, brollTrack, framing.document, render?.exportId]);
+  useEffect(() => {
+    if (!render || !videoId) return;
+    let cancelled = false;
+    setExportStatus(null);
+    const refresh = async () => {
+      try { const r = await fetch(`/api/analyze/${videoId}/render`, { cache: "no-store" });
+        if (!r.ok) throw new Error("Export status unavailable");
+        const data = await r.json();
+        if (!cancelled) setExportStatus(data.exportId === render.exportId ? data.state : { stale: true, ready: false, issues: ["A newer export exists. Reload to review it."] });
+      } catch { if (!cancelled) setExportStatus(null); }
+    };
+    void refresh(); const timer = setInterval(refresh, 5000);
+    window.addEventListener("focus", refresh);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [exportInputKey, videoId, render]);
+  const unsavedEdits = textSaving || noteSaving || Object.keys(textDrafts).length > 0 || Object.keys(instructionDrafts).length > 0 || ["Unsaved", "Saving", "Not saved"].includes(framing.status);
+  const optionsChanged = !!render && (!render.requested || render.requested.audio !== audioMode || render.requested.burn_text !== burnText || (audioMode === "music" && render.requested.music_filename !== musicFilename));
+  const renderStale = !!render && (exportStatus?.stale !== false || unsavedEdits || optionsChanged);
+  const exportReady = !!render?.exportId && exportStatus?.ready === true && !renderStale && !rendering && !exportOptionsSaving && !exportOptionsError;
+  const downloadExport = async () => {
+    if (!render || !exportReady) return;
+    try { const r = await fetch(`/api/renders/${videoId}?export=${encodeURIComponent(render.exportId!)}&download=1`);
+      if (!r.ok) throw new Error((await r.json()).error || "Download failed");
+      const url = URL.createObjectURL(await r.blob()); const a = document.createElement("a");
+      a.href = url; a.download = `${displayName || "video"}.mp4`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { setRenderError(e instanceof Error ? e.message : "Download failed"); }
+  };
 
   // What a render would use per shot: your pick, the top match, or nothing
   const renderBreakdown = recs
@@ -1663,7 +1734,7 @@ function VideoViewerContent() {
   // Soundtrack picker (None / Original / Song) — in the render controls and
   // again in the render tab so a re-render can switch audio from there
   const audioControls = (
-    <div className="flex flex-col gap-1">
+    <fieldset disabled={!exportOptionsLoaded} className="flex flex-col gap-1">
       <div className="flex items-center gap-3 flex-wrap text-xs text-muted-foreground">
         <span className="font-semibold uppercase tracking-wide text-[10px]">
           Audio
@@ -1708,7 +1779,7 @@ function VideoViewerContent() {
           </p>
         </div>
       )}
-    </div>
+    </fieldset>
   );
 
   // Per-shot fix note: the inline editor (Save & re-render / Save only) or
@@ -1911,9 +1982,9 @@ function VideoViewerContent() {
         <div className="flex flex-col gap-3">
           <button
             onClick={handleRender}
-            disabled={rendering || !recs}
+            disabled={rendering || !recs || !exportOptionsLoaded || !framing.document}
             title={
-              recs ? undefined : "Match recommended B-roll clips first"
+              !framing.document ? "Loading saved framing" : recs ? undefined : "Match library footage first"
             }
             className={actionButtonClass}
           >
@@ -1927,11 +1998,11 @@ function VideoViewerContent() {
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
             <input
               type="checkbox"
-              checked={burnText}
+              disabled={!exportOptionsLoaded} checked={burnText}
               onChange={(e) => setBurnText(e.target.checked)}
               className="accent-current"
             />
-            Burn the on-screen text onto the video
+            Include text in exported video
           </label>
           {burnText && (
             <div className="flex flex-col gap-1">
@@ -2027,7 +2098,7 @@ function VideoViewerContent() {
     </div>
   );
 
-  // Video Editing / Shots / B-Roll Clips / (Storyboards) / Render Details / Captions
+  // Video Editing / Shots / Replace shots / (Storyboards) / Render Details / Captions
   const tabClass = (tab: typeof panelTab, first = false) =>
     `shrink-0 whitespace-nowrap px-4 py-2 transition-colors ${first ? "" : "border-l border-border "}${
       panelTab === tab
@@ -2043,7 +2114,7 @@ function VideoViewerContent() {
         Shots
       </button>
       <button onClick={() => setPanelTab("clips")} className={tabClass("clips")}>
-        B-Roll Clips
+        Replace shots
       </button>
       {project?.kind === "master" && (
         <button
@@ -2053,6 +2124,7 @@ function VideoViewerContent() {
           Storyboards
         </button>
       )}
+      {(variations || panelTab === "variations") && <button onClick={() => setPanelTab("variations")} className={tabClass("variations")}>Alternate suggestions</button>}
       <button onClick={() => setPanelTab("virality")} className={tabClass("virality")}>
         Virality Review
       </button>
@@ -2063,7 +2135,7 @@ function VideoViewerContent() {
         onClick={() => setPanelTab("captions")}
         className={tabClass("captions")}
       >
-        Captions
+        Post caption &amp; hashtags
       </button>
     </div>
   );
@@ -2111,7 +2183,7 @@ function VideoViewerContent() {
         {analysis.usage?.totalTokens
           ? ` · ${analysis.usage.totalTokens.toLocaleString()} tokens`
           : ""}
-        {cost ? ` · est. ${cost}` : ""}
+        {cost ? ` · ${cost}` : ""}
       </p>
     </div>
   );
@@ -2122,6 +2194,8 @@ function VideoViewerContent() {
       <div
         className={`flex flex-col gap-6 w-full ${analysis ? styles.content : "max-w-sm"}`}
       >
+        {exportOptionsError && <p role="alert" className="text-sm text-red-400">{exportOptionsError}. Reload to retry loading or change the setting to retry saving.</p>}
+        {videoId && <WorkflowActivity videoId={videoId} />}
         {/* Ribbon 1: video player + the active tab's panel */}
         <div className={analysis ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
           <div className={`${styles.player} mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0`}>
@@ -2213,7 +2287,7 @@ function VideoViewerContent() {
                         <span>Set up on-screen text for shot {selectedShot + 1}</span>
                         <button className="underline" onClick={() => setInspector("frame")}>Back to frame</button>
                       </div>}
-                      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={burnText} onChange={e => setBurnText(e.target.checked)} />Include on-screen text in preview &amp; export</label>
+                      <label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={!exportOptionsLoaded} checked={burnText} onChange={e => setBurnText(e.target.checked)} />Include on-screen text in preview &amp; export</label>
                       {!burnText && <p className="text-xs text-amber-400">All on-screen text is currently hidden.</p>}
                       <ShotTextEditor shotNumber={selectedShot + 1} duration={shot.end_time - shot.start_time} entry={textEntry(selectedShot)} defaults={textStyle}
                         words={textWords(selectedShot)} dirty={!!textDrafts[String(selectedShot)]} saving={textSaving} aligning={textAligning} error={textError}
@@ -2222,7 +2296,7 @@ function VideoViewerContent() {
                     {shot && effectiveInspector === "frame" && <div className="flex flex-col gap-2 border-t border-border pt-3">
                       <p className="text-xs text-muted-foreground">{shot.description}</p>
                       <p className="text-xs">{shot.spoken_text}</p>
-                      <label className="text-xs font-semibold">AI editing instructions</label>
+                      <label className="text-xs font-semibold">Clip instructions</label>
                       <div className="h-28"><ShotInstructionEditor key={selectedShot} index={selectedShot} draft={instructionDrafts[String(selectedShot)]} onDraftChange={changeInstruction} note={editNotes[String(selectedShot)] ?? ""} description={shot.description}
                         busy={noteSaving || rendering} onSave={saveNote} onApply={() => void handleRender()} /></div>
                     </div>}
@@ -2648,15 +2722,12 @@ function VideoViewerContent() {
                     </div>
                   ))}
 
+                {panelTab === "variations" && (variations ? <VariationsPanel videoId={videoId!} variations={variations} editNotes={editNotes} canRender={!!recs && !!framing.document && exportOptionsLoaded} rendering={rendering} onVariations={setVariations} onEditNotes={setEditNotes} onRender={() => void handleRender()} /> : <p role="status">{variationError ?? "No alternate suggestions are saved for this project yet."}</p>)}
                 {panelTab === "virality" && videoId && <ViralityReviewPanel videoId={videoId} storyboardId={searchParams.get("storyboard") ?? undefined} onSeek={project?.kind === "master" ? seekTo : undefined} />}
                 {panelTab === "storyboards" &&
                   project?.kind === "master" &&
                   videoId && (
-                    <StoryboardPanel
-                      videoId={videoId}
-                      filename={filename}
-                      onSeek={seekTo}
-                    />
+                    <StoryboardPreviewPanel videoId={videoId} filename={filename} />
                   )}
 
                 {/* Render Details: once a render exists, TikTok drafts +
@@ -2731,7 +2802,7 @@ function VideoViewerContent() {
                           )}
                           <button
                             onClick={handleTiktokUpload}
-                            disabled={tiktokUploading || rendering}
+                            disabled={tiktokUploading || !exportReady}
                             className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-semibold disabled:opacity-60"
                           >
                             {tiktokUploading
@@ -2741,6 +2812,7 @@ function VideoViewerContent() {
                         </div>
                       )}
 
+                      {tiktokStatus?.connected && <button className="self-start text-xs underline" onClick={() => void checkTiktokUpload(true)}>Check latest delivery status</button>}
                       {tiktokResult && (
                         <p
                           className={`text-[11px] break-words ${
@@ -2778,11 +2850,17 @@ function VideoViewerContent() {
                     {renderStale && (
                       <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-2">
                         <p className="text-[11px] text-yellow-700 dark:text-yellow-400">
-                          Shot times changed after this render — render again to apply them.
+                          This export does not include your latest saved changes or selected settings. Render again before downloading or uploading.
                         </p>
                       </div>
                     )}
 
+                    {render && <div className="space-y-2 rounded border border-border p-3">
+                      <p role="status" className="text-sm font-semibold">{exportReady ? "Ready to download or upload" : render.readiness === "issues" ? "Preview with issues" : renderStale ? "Export needs updating" : "Checking export…"}</p>
+                      {(render.issues ?? []).map((issue, i) => <p key={i} className="text-xs text-amber-600">{issue}</p>)}
+                      <button onClick={downloadExport} disabled={!exportReady} className="rounded bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-50">Download MP4</button>
+                      <p className="text-xs text-muted-foreground">Export from {new Date(render.renderedAt).toLocaleString()}</p>
+                    </div>}
                     {geminiActions}
 
                     {analysisCard}
@@ -2829,7 +2907,7 @@ function VideoViewerContent() {
                           className="w-full h-full object-contain"
                         >
                           <source
-                            src={`/api/renders/${render.videoId}?v=${encodeURIComponent(render.renderedAt)}`}
+                            src={`/api/renders/${render.videoId}?${render.exportId ? `export=${encodeURIComponent(render.exportId)}` : `v=${encodeURIComponent(render.renderedAt)}`}`}
                             type="video/mp4"
                           />
                         </video>

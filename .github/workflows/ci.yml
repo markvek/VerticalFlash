@@ -20,9 +20,9 @@ jobs:
 
       - run: npm ci --prefix agent-kit/mcp
 
-      - run: npm run test:agents
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - run: npm run test:benchmarks
+      - run: npm test
 
       - run: npm test --prefix agent-kit/mcp
 

@@ -1,5 +1,6 @@
 let requestId = 0;
 let activeMedia: HTMLMediaElement | null = null;
+let pausePreservedRequest: number | null = null;
 const listeners = new Set<() => void>();
 
 function pauseOthers(except: HTMLMediaElement | null) {
@@ -11,6 +12,7 @@ function pauseOthers(except: HTMLMediaElement | null) {
 
 function selectPlayback(media: HTMLMediaElement | null) {
   requestId += 1;
+  pausePreservedRequest = null;
   pauseOthers(media);
   activeMedia = media;
   listeners.forEach((listener) => listener());
@@ -24,6 +26,13 @@ export function beginMediaPlayback() {
 
 export function isCurrentMediaPlayback(request: number) {
   return request === requestId;
+}
+
+// Playback-driven storyboard sequences can wait through a native pause.
+// A different player or an explicit stop still invalidates their request.
+export function preservePlaybackOnPause(request: number) {
+  if (isCurrentMediaPlayback(request)) pausePreservedRequest = request;
+  return () => { if (pausePreservedRequest === request) pausePreservedRequest = null; };
 }
 
 export function subscribeMediaPlayback(listener: () => void) {
@@ -48,7 +57,7 @@ export function installMediaPlaybackGuard() {
   };
   const onPause = (event: Event) => {
     const media = event.target;
-    if (media instanceof HTMLMediaElement && media === activeMedia && media.paused && !media.ended) selectPlayback(null);
+    if (media instanceof HTMLMediaElement && media === activeMedia && media.paused && !media.ended && pausePreservedRequest !== requestId) selectPlayback(null);
   };
   // Media events do not bubble; capture also covers players mounted in dialogs.
   document.addEventListener("play", onPlay, true);

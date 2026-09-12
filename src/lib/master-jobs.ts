@@ -1,3 +1,5 @@
+import { saveProjectModel } from "./models/native";
+import { beginActivity, finishActivity } from "./workflow-activity";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import { join } from "path";
@@ -65,6 +67,7 @@ export async function retryMasterJob(videoId: string) {
 export async function runMasterJob(videoId: string) {
   if (running.has(videoId)) return;
   running.add(videoId);
+  const activity = await beginActivity(videoId, "Prepare footage and transcript");
   let job: Job | null = null;
   try {
     job = await readMasterJob(videoId);
@@ -73,6 +76,7 @@ export async function runMasterJob(videoId: string) {
     const { readProjectMeta } = await import("./project-meta");
     const { analyzeAndStoreMaster, storyboardDryRun } = await import("./master-analyze");
     const { getGeminiClient } = await import("./gemini");
+    if (job.input.model) await saveProjectModel(videoId, job.input.model);
     const videoPath = join(STORYBOARDS_DIR, job.filename);
     let project = await readProjectMeta(videoPath);
     let duration = project?.kind === "master" ? await probeDuration(videoPath) : null;
@@ -86,7 +90,9 @@ export async function runMasterJob(videoId: string) {
     await writeJob(job);
     await analyzeAndStoreMaster(storyboardDryRun() ? null : getGeminiClient(job.input.model), videoPath, videoId, project, duration);
     await writeJob({ ...job, status: "ready" });
+    if (activity) await finishActivity(activity, null);
   } catch (error) {
+    if (activity) await finishActivity(activity, error instanceof Error ? error.message : "Processing failed");
     console.error("Storyboard processing failed:", error);
     if (job) await writeJob({ ...job, status: "failed", error: error instanceof Error ? error.message : "Storyboard processing failed" });
   } finally {

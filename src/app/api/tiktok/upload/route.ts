@@ -1,3 +1,5 @@
+import { exportPaths, exportState } from "@/lib/export-state";
+import { renderManifestPath } from "@/lib/render-remake";
 import { NextRequest, NextResponse } from "next/server";
 import { execFileAsync } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
@@ -5,8 +7,7 @@ import {
   getValidAccessToken,
   TikTokNotConnectedError,
 } from "@/lib/tiktok-auth";
-import { renderVideoPath } from "@/lib/render-remake";
-import { recordPublish } from "@/lib/publish-store";
+import { recordPublish, readPublishStore, updatePublishStatus } from "@/lib/publish-store";
 import { isValidVideoId } from "@/lib/video-id";
 
 const INIT_URL =
@@ -28,8 +29,8 @@ const inFlight = new Set<string>();
 
 // Successful uploads append a publish record (best-effort — recordPublish
 // never throws) so the published post can be matched back to this render
-async function uploadSuccess(videoId: string, publishId: string, status: string) {
-  await recordPublish({ videoId, publishId, status });
+async function uploadSuccess(videoId: string, publishId: string, status: string, exportId?: string) {
+  await updatePublishStatus(publishId, status).catch(() => recordPublish({ videoId, publishId, status, exportId }));
   return NextResponse.json({ success: true, publishId, status });
 }
 
@@ -37,9 +38,11 @@ export async function POST(request: NextRequest) {
   // Drafts can't carry a caption — TikTok's inbox upload takes bytes only;
   // the user writes the caption in the TikTok app when posting
   let videoId = "";
+  let exportId: string | undefined;
   try {
     const body = await request.json();
     videoId = String(body?.videoId ?? "");
+    exportId = typeof body.exportId === "string" ? body.exportId : undefined;
   } catch {
     // fall through to validation below
   }
@@ -47,6 +50,8 @@ export async function POST(request: NextRequest) {
   if (!videoId || !isValidVideoId(videoId)) {
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
   }
+
+  if (exportId && !/^[a-f0-9-]{36}$/.test(exportId)) return NextResponse.json({ error: "Invalid export ID" }, { status: 400 });
 
   if (inFlight.has(videoId)) {
     return NextResponse.json(
@@ -70,7 +75,13 @@ export async function POST(request: NextRequest) {
       throw error;
     }
 
-    const videoPath = renderVideoPath(videoId);
+    const manifest = JSON.parse(await fs.readFile(exportId ? exportPaths(videoId, exportId).manifest : renderManifestPath(videoId), "utf8"));
+    const state = await exportState(manifest);
+    if (!state.ready) return NextResponse.json({ error: state.stale ? "Render the latest changes before uploading." : "Resolve the export issues before uploading.", issues: state.issues }, { status: 409 });
+    exportId = manifest.exportId;
+    const pending = (await readPublishStore()).publishes.slice().reverse().find(record => record.videoId === videoId && record.exportId === exportId && !["FAILED", "SEND_TO_USER_INBOX", "PUBLISH_COMPLETE"].includes(record.status));
+    if (pending) return NextResponse.json({ success: true, publishId: pending.publishId, status: pending.status, alreadySubmitted: true });
+    const videoPath = exportPaths(videoId, exportId!).video;
     let videoSize: number;
     try {
       videoSize = (await fs.stat(videoPath)).size;
@@ -192,6 +203,7 @@ export async function POST(request: NextRequest) {
 
     // Poll until TikTok finishes ingesting the bytes we just sent
     let status = "PROCESSING_UPLOAD";
+    await recordPublish({ videoId, publishId, status, exportId });
     for (let attempt = 0; attempt < 15; attempt++) {
       await new Promise((r) => setTimeout(r, 2000));
       const statusRes = await fetch(STATUS_URL, {
@@ -205,9 +217,10 @@ export async function POST(request: NextRequest) {
       const statusData = await statusRes.json();
       status = statusData?.data?.status || status;
       if (status === "SEND_TO_USER_INBOX" || status === "PUBLISH_COMPLETE") {
-        return uploadSuccess(videoId, publishId, status);
+        return uploadSuccess(videoId, publishId, status, exportId);
       }
       if (status === "FAILED") {
+        await updatePublishStatus(publishId, status);
         return NextResponse.json(
           {
             error: `TikTok processing failed: ${statusData?.data?.fail_reason || "unknown reason"}`,
@@ -219,7 +232,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Still processing — the draft usually lands shortly after
-    return uploadSuccess(videoId, publishId, status);
+    return uploadSuccess(videoId, publishId, status, exportId);
   } catch (error) {
     console.error("TikTok upload failed:", error);
     return NextResponse.json(
@@ -229,4 +242,23 @@ export async function POST(request: NextRequest) {
   } finally {
     inFlight.delete(videoId);
   }
+}
+
+// Read saved uploads on return; refresh one pending status without uploading again.
+export async function GET(request: NextRequest) {
+  const videoId = request.nextUrl.searchParams.get("videoId");
+  if (!videoId || !isValidVideoId(videoId)) return NextResponse.json({ error: "Invalid videoId" }, { status: 400 });
+  try {
+    const records = (await readPublishStore()).publishes.filter(r => r.videoId === videoId);
+    const latest = records.at(-1);
+    if (latest && request.nextUrl.searchParams.get("refresh") === "1" && !["SEND_TO_USER_INBOX", "PUBLISH_COMPLETE", "FAILED"].includes(latest.status)) {
+      const accessToken = await getValidAccessToken();
+      const response = await fetch(STATUS_URL, { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ publish_id: latest.publishId }) });
+      const data = await response.json();
+      if (!response.ok || data.error?.code !== "ok" || typeof data.data?.status !== "string") throw new Error(data.error?.message || "TikTok status unavailable");
+      latest.status = data.data.status;
+      await updatePublishStatus(latest.publishId, latest.status);
+    }
+    return NextResponse.json({ latest: latest ?? null });
+  } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Upload status unavailable" }, { status: 502 }); }
 }

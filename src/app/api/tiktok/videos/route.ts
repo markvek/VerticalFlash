@@ -73,6 +73,9 @@ export async function GET() {
     return NextResponse.json({
       videos: enrichedVideos,
       user,
+      metricSource: "TikTok Display API",
+      tikhubCachedAt: tikhubCache?.cachedAt ?? null,
+      tikhubCacheExpiresAt: tikhubCache?.cacheExpiresAt ?? null,
       fetchedAt: Date.now(),
     });
   } catch (error) {

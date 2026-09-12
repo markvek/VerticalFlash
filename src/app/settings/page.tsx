@@ -1,3 +1,4 @@
+import { WorkflowActivity } from "@/components/form/WorkflowActivity";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowDownToLine, BarChart3, Check, FileText, Monitor, Plug, Settings2 } from "lucide-react";
@@ -13,9 +14,10 @@ export default function SettingsPage() {
       <header className="space-y-2">
         <div className="flex items-center gap-2 text-sm text-muted-foreground"><Settings2 className="size-4" aria-hidden="true" />Workspace</div>
         <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="max-w-2xl text-muted-foreground">Select workflow agents, connect external agent tooling, and manage workspace-level controls.</p>
+        <p className="max-w-2xl text-muted-foreground">Review local activity, connect external agent tooling, and save preferences for future workflows.</p>
       </header>
 
+      <WorkflowActivity />
       <AgentSettingsBoard />
 
       <section aria-labelledby="benchmarks" className="rounded-lg border border-border bg-card p-5 sm:p-7">

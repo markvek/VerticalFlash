@@ -248,7 +248,7 @@ export function BenchmarkJudge({ runId }: BenchmarkJudgeProps) {
                     <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 p-3 text-xs">
                       <div className="flex items-center justify-between font-medium">
                         <span>
-                          AI judge · virality
+                          AI text assessment
                           {aiReview?.winnerVariantId === variant.id && (
                             <span className="ml-1 rounded bg-primary px-1 text-primary-foreground">top pick</span>
                           )}

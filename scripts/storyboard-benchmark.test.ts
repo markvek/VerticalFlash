@@ -17,6 +17,9 @@ test(
     process.env.GEMINI_API_KEY = "test-key-never-sent";
     process.env.BENCHMARK_GEMINI_MODELS = "test-a,test-b,test-c,test-d";
     delete process.env.STORYBOARD_DRY_RUN;
+    const originalFetch = globalThis.fetch;
+    let externalRequests = 0;
+    globalThis.fetch = async () => { externalRequests++; throw new Error("External requests are forbidden in this benchmark test"); };
     try {
       const paths = await import("../src/lib/paths");
       const { getBrandConfig } = await import("../src/lib/config");
@@ -226,8 +229,15 @@ test(
             }),
           };
         };
-      await runStoryboardBenchmark(run.id, generatorFor);
+      const judge = async (candidate: import("../src/lib/benchmark-schema").BenchmarkRun) => {
+        const ready = candidate.variants.filter(v => v.status === "ready");
+        return { id: randomUUID(), createdAt: now, judgeModel: "fixture-judge", winnerVariantId: ready[0]?.id ?? null,
+          reviews: ready.map(v => ({ variantId: v.id, virality: 60, scores: { hook: 6, pacing: 6, clarity: 6, polish: 6, broll_fit: 6 }, wouldPost: false, rationale: "Controlled text assessment" })) };
+      };
+      await runStoryboardBenchmark(run.id, generatorFor, judge);
       let finished = (await readBenchmarkRun(run.id))!;
+      assert.equal(finished.aiReviews[0]?.judgeModel, "fixture-judge");
+      assert.equal(finished.aiReviews[0]?.reviews.length, 3);
       assert.equal(
         finished.variants.filter((v) => v.status === "ready").length,
         3,
@@ -250,7 +260,7 @@ test(
       ).length;
       fail = false;
       await retryStoryboardBenchmark(run.id);
-      await runStoryboardBenchmark(run.id, generatorFor);
+      await runStoryboardBenchmark(run.id, generatorFor, judge);
       finished = (await readBenchmarkRun(run.id))!;
       assert.ok(
         finished.variants.every((v) => v.status === "ready"),
@@ -358,7 +368,7 @@ test(
       const matchCalls = calls.filter((c) =>
         c.prompt.startsWith("Choose and apply"),
       ).length;
-      await runStoryboardBenchmark(offRun.id, generatorFor);
+      await runStoryboardBenchmark(offRun.id, generatorFor, judge);
       const offFinished = (await readBenchmarkRun(offRun.id))!;
       assert.ok(
         offFinished.variants.every((v) => v.status === "ready"),
@@ -394,6 +404,8 @@ test(
       assert.equal(reviewed.variants[0].humanScore, 100);
       await assert.rejects(() => retryStoryboardBenchmark(run.id), /locked/);
     } finally {
+      globalThis.fetch = originalFetch;
+      assert.equal(externalRequests, 0, "All generation and judge requests must be injected");
       await fs.rm(root, { recursive: true, force: true });
     }
   },

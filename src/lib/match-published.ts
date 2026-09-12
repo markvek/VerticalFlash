@@ -19,6 +19,7 @@ export interface PublishedFacts {
 }
 
 export interface RenderCandidate {
+  exportId?: string;
   videoId: string;
   // The download filename (manifest.sourceVideo) — the /downloads/[filename] param
   filename: string;
@@ -34,6 +35,8 @@ export interface RenderCandidate {
 }
 
 export interface PublishedMatch {
+  exportId?: string;
+  confirmed?: boolean;
   publishedId: string;
   videoId: string;
   filename: string;
@@ -120,6 +123,8 @@ export function scoreCandidate(
     return null;
 
   const renderedMs = Date.parse(candidate.renderedAt);
+  // Immutable exports cannot have been posted before they were rendered.
+  if (candidate.exportId && publishedMs < renderedMs - HOUR_MS) return null;
   if (Number.isNaN(renderedMs) && Number.isNaN(uploadedMs)) return null;
 
   // Published duration is integer seconds — a real match rounds within ±1
@@ -161,13 +166,16 @@ export function matchPublished(
       )
       .sort((a, b) => b.score - a.score);
 
-    const best = scored[0];
+    // Several uploads of the same edit are one project candidate, not competing projects.
+    const distinct = scored.filter((item, index) => scored.findIndex(other => other.candidate.videoId === item.candidate.videoId) === index);
+    const best = distinct[0];
     if (!best || best.score < ACCEPT_SCORE) continue;
-    if (scored.length > 1 && best.score - scored[1].score < ACCEPT_MARGIN)
+    if (distinct.length > 1 && best.score - distinct[1].score < ACCEPT_MARGIN)
       continue;
 
     matches.push({
       publishedId: video.id,
+      exportId: scored.some(other => other !== best && other.candidate.videoId === best.candidate.videoId && other.candidate.exportId !== best.candidate.exportId && best.score - other.score < ACCEPT_MARGIN) ? undefined : best.candidate.exportId,
       videoId: best.candidate.videoId,
       filename: best.candidate.filename,
       score: Math.round(best.score * 100) / 100,

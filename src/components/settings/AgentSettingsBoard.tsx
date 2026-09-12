@@ -75,7 +75,7 @@ export function AgentSettingsBoard() {
       if (!response.ok) throw new Error(data.error || "Could not save agent settings");
       setPayload(data);
       setDraft(data.settings);
-      setMessage("Agent settings saved.");
+      setMessage("Preferences saved. These do not change active models.");
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not save agent settings");
     } finally {
@@ -131,11 +131,11 @@ export function AgentSettingsBoard() {
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <SlidersHorizontal className="size-4" aria-hidden="true" />
-            Execution control
+            Planned workflow preferences
           </div>
-          <h2 id="agent-selector" className="text-lg font-semibold">Agent selector board</h2>
+          <h2 id="agent-selector" className="text-lg font-semibold">Future agent preferences</h2>
           <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-            Choose which agent should own each workflow step. These selections are saved now; runtime adapters and live benchmark columns can read from this same board later.
+            These preferences do not change which model runs today. Use the model selector in each creation flow; saved project models drive supported analysis and editing operations.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

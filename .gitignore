@@ -52,3 +52,5 @@ brand.config.json
 # Local tooling
 .gstack/
 .context/
+
+/workflow-activity/

@@ -75,7 +75,7 @@ export async function POST(
     shotIndex = body.shot_index;
     filename = body.filename;
     if (typeof body.prompt === "string" && body.prompt.trim()) {
-      customPrompt = body.prompt.trim();
+      customPrompt = body.prompt.trim().slice(0, 4000);
     }
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });

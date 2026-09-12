@@ -1,3 +1,5 @@
+import { archiveExport, editRevision } from "./export-state";
+import { projectModel } from "./models/native";
 import { overlayForShot, resolveTextCues } from "./text-cues";
 import { promises as fs } from "fs";
 import { encodeFramedClip } from "./framing-render";
@@ -9,7 +11,6 @@ import type { GoogleGenAI } from "@google/genai";
 import { getGeminiClient } from "./gemini";
 import type { Analysis } from "./analysis-schema";
 import {
-  ShotRecommendationsZ,
   type Recommendation,
   type ShotRecommendations,
 } from "./recommendation-schema";
@@ -32,7 +33,7 @@ import {
   type RenderManifest,
   type RenderShot,
 } from "./render-schema";
-import { ANALYSIS_DIR, RENDERS_DIR } from "./paths";
+import { RENDERS_DIR } from "./paths";
 import { requireProjectPath } from "./download-files";
 export { RENDERS_DIR } from "./paths";
 
@@ -557,7 +558,7 @@ async function fillMissingTrims(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch {
     warnings.push(
       "Gemini is not configured — clips without a trim window are cut from the clip start"
@@ -615,16 +616,8 @@ async function fillMissingTrims(
   });
   await Promise.all(workers);
 
-  // Persist the freshly generated windows (planned shots share the rec
-  // objects inside `recs`, so the updates above are already in it)
-  try {
-    await fs.writeFile(
-      join(ANALYSIS_DIR, `${videoId}.recommendations.json`),
-      JSON.stringify(ShotRecommendationsZ.parse(recs), null, 2)
-    );
-  } catch (error) {
-    console.error("failed to persist on-demand trim windows:", error);
-  }
+  // Chosen windows belong to this export; do not overwrite edits made while rendering.
+
 }
 
 const ENCODE_ARGS = [
@@ -872,6 +865,7 @@ async function assembleShotAudio(
 }
 
 export interface RenderInput {
+  editRevision?: string;
   framing?: FramingDocument;
   originalSources?: Record<string, FrameSource[]>;
   videoId: string;
@@ -1031,6 +1025,7 @@ async function overlayBroll(
 export async function renderRemake(
   input: RenderInput
 ): Promise<RenderManifest> {
+  const initialRevision = input.editRevision ?? await editRevision(input.videoId);
   const {
     framing,
     originalSources,
@@ -1060,7 +1055,7 @@ export async function renderRemake(
   let directives = new Map<number, EditDirective>();
   if (Object.keys(editNotes).length > 0) {
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(await projectModel(videoId));
       const interpreted = await interpretEditNotes(
         ai,
         analysis,
@@ -1110,6 +1105,9 @@ export async function renderRemake(
   );
   for (const p of planned) {
     p.edit_note = editNotes[String(p.shot_index)] ?? null;
+    const requested = recs.shots.find(s => s.shot_index === p.shot_index);
+    if (!requested?.keep_source && requested?.selected_filename && requested.selected_filename !== p.clip)
+      warnings.push(`Shot ${p.shot_index + 1}: the selected clip was unavailable or too short; this preview uses a different clip. Choose usable footage and render again.`);
   }
   // Staleness only matters for shots that draw on the library (a cutdown
   // made entirely of original footage never matched against it)
@@ -1648,7 +1646,7 @@ export async function renderRemake(
     // Atomic replace: a killed render never corrupts an existing output
     await fs.rename(finalPath, renderVideoPath(videoId));
 
-    const manifest: RenderManifest = RenderManifestZ.parse({
+    let manifest: RenderManifest = RenderManifestZ.parse({
       framing,
       videoId,
       renderedAt: new Date().toISOString(),
@@ -1664,10 +1662,14 @@ export async function renderRemake(
       time_target: timeTarget,
       text_burn: textBurn,
       warnings,
-      shots: planned.map(({ rec: _rec, ...shot }) => shot),
+      shots: planned.map(p => { const shot = { ...p, shot_id: analysis.shots.find(s => s.index === p.shot_index)?.id }; delete (shot as Partial<PlannedShot>).rec; return shot; }),
       broll: brollApplied,
     });
 
+    manifest = await archiveExport(renderVideoPath(videoId), manifest, input.editRevision ?? initialRevision, {
+      audio: input.audio ?? (input.includeOriginalAudio ? "original" : "none"),
+      music_filename: input.musicFilename ?? null, burn_text: input.burnText ?? false,
+    });
     const manifestPath = renderManifestPath(videoId);
     const tmp = `${manifestPath}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(manifest, null, 2));

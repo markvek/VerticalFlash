@@ -8,7 +8,7 @@ import { generateShotPrompts } from "@/lib/generation-prompts";
 import { classifyGeminiError } from "@/lib/library-analyze";
 import {
   loadGenerations,
-  saveGenerations,
+  mutateGenerations,
   getOrCreateShot,
 } from "@/lib/generation-store";
 import { ANALYSIS_DIR } from "@/lib/paths";
@@ -88,28 +88,30 @@ export async function POST(
 
   try {
     const { prompts, usage } = await generateShotPrompts(ai, analysis, targets);
+    const latest = await mutateGenerations(videoId, current => {
     for (const [index, prompt] of prompts) {
-      const shot = getOrCreateShot(generations, index);
+      const shot = getOrCreateShot(current, index);
+      if (shot.prompt !== (generations.shots[String(index)]?.prompt ?? "")) continue;
       shot.prompt = prompt;
       shot.prompt_source = "gemini";
     }
-    generations.promptsGeneratedAt = new Date().toISOString();
-    generations.promptModel = GEMINI_MODEL;
+    current.promptsGeneratedAt = new Date().toISOString();
+    current.promptModel = GEMINI_MODEL;
     if (usage) {
-      generations.promptUsage = {
+      current.promptUsage = {
         promptTokens:
-          ((generations.promptUsage?.promptTokens ?? 0) +
+          ((current.promptUsage?.promptTokens ?? 0) +
             ((usage.promptTokenCount as number) ?? 0)) || undefined,
         outputTokens:
-          ((generations.promptUsage?.outputTokens ?? 0) +
+          ((current.promptUsage?.outputTokens ?? 0) +
             ((usage.candidatesTokenCount as number) ?? 0)) || undefined,
         totalTokens:
-          ((generations.promptUsage?.totalTokens ?? 0) +
+          ((current.promptUsage?.totalTokens ?? 0) +
             ((usage.totalTokenCount as number) ?? 0)) || undefined,
       };
     }
-    await saveGenerations(generations);
-    return NextResponse.json(generations);
+    });
+    return NextResponse.json(latest);
   } catch (error) {
     console.error("generation prompt drafting failed:", error);
     const { kind, retryAfterMs } = classifyGeminiError(error);

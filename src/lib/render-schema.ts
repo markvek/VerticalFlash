@@ -1,3 +1,4 @@
+import { ExportOptionsZ } from "./export-options";
 import { z } from "zod";
 import { FramingDocumentZ } from "./framing-schema";
 import { TEXT_POSITIONS, TEXT_STYLE_PRESETS } from "./text-overlays-schema";
@@ -18,6 +19,7 @@ export const RENDER_SETTINGS = {
 export const MAX_PAD_SECONDS = 0.1;
 
 export const RenderShotZ = z.object({
+  shot_id: z.string().optional(),
   shot_index: z.number(),
   start_time: z.number(),
   end_time: z.number(),
@@ -64,6 +66,11 @@ export type RenderShot = z.infer<typeof RenderShotZ>;
 
 // Full stored manifest: renders/<videoId>.render.json
 export const RenderManifestZ = z.object({
+  exportId: z.string().optional(),
+  editRevision: z.string().optional(),
+  requested: ExportOptionsZ.optional(),
+  readiness: z.enum(["ready", "issues"]).optional(),
+  issues: z.array(z.string()).optional(),
   framing: FramingDocumentZ.optional(),
   videoId: z.string(),
   renderedAt: z.string(),

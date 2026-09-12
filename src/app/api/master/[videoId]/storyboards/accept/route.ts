@@ -1,3 +1,4 @@
+import { trackedRoute } from "@/lib/tracked-route";
 import { NextRequest, NextResponse } from "next/server";
 import { isValidVideoId } from "@/lib/video-id";
 import { ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
@@ -19,7 +20,7 @@ const inFlight = new Set<string>();
 
 // Accept one storyboard: cut its beats out of the master into a new
 // "cutdown" project and open it in the editor. Repeatable per storyboard.
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -109,3 +110,5 @@ export async function POST(
     inFlight.delete(key);
   }
 }
+
+export const POST = trackedRoute("Accept storyboard", handlePost);

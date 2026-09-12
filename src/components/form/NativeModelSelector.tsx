@@ -2,26 +2,30 @@
 import { useEffect, useState } from "react";
 import type { ModelOption } from "@/lib/models/schema";
 export function NativeModelSelector({
+  videoId,
   value,
   onChange,
   disabled = false,
 }: {
+  videoId?: string;
   value: string;
   onChange: (value: string) => void;
   disabled?: boolean;
 }) {
+  const [defaultModel, setDefaultModel] = useState("Loading default…");
   const [models, setModels] = useState<ModelOption[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    fetch("/api/models")
+    fetch(`/api/models${videoId ? `?videoId=${encodeURIComponent(videoId)}` : ""}`)
       .then((r) => r.json())
-      .then((data) =>
+      .then((data) => {
+        setDefaultModel(data.defaultModel);
         setModels(
           data.models.filter((m: ModelOption) => m.provider === "gemini"),
-        ),
-      )
+        );
+      })
       .catch(() => setError("Could not load model choices"));
-  }, []);
+  }, [videoId]);
   return (
     <label className="block text-sm space-y-1">
       <span>Model</span>
@@ -31,7 +35,7 @@ export function NativeModelSelector({
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
       >
-        <option value="">Saved project model / default</option>
+        <option value="">Default: {defaultModel}</option>
         {models.map((m) => (
           <option key={m.id} value={m.model} disabled={!m.available}>
             {m.model}

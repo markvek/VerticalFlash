@@ -4,7 +4,7 @@ import { basename, extname, join } from "path";
 import { LIBRARY_DIR } from "@/lib/paths";
 import { ensureFfmpeg, execFileAsync, ffmpegErrorResponse } from "@/lib/ffmpeg";
 import { VIDEO_EXTENSIONS, type LibraryClip } from "@/lib/library-schema";
-import { loadLibrary, saveLibrary } from "@/lib/library-store";
+import { loadLibrary, saveLibrary, withLibraryLock } from "@/lib/library-store";
 import { analyzeLibraryClip } from "@/lib/library-analyze";
 import { isValidMusicFilename } from "@/lib/music-schema";
 
@@ -166,11 +166,12 @@ export async function POST(request: NextRequest) {
 
     // Register in the metadata store (reload each time: analyzeLibraryClip
     // also writes it)
+    let clip = await withLibraryLock(async () => {
     const library = await loadLibrary();
     const now = new Date().toISOString();
     const existingIndex = library.videos.findIndex((v) => v.filename === filename);
     const existing = existingIndex !== -1 ? library.videos[existingIndex] : undefined;
-    let clip: LibraryClip = {
+    const clip: LibraryClip = {
       ...(existing ?? { createdAt: now }),
       filename,
       source: "upload",
@@ -185,6 +186,8 @@ export async function POST(request: NextRequest) {
     }
     library.lastUpdated = now;
     await saveLibrary(library);
+    return clip;
+    });
 
     if (analyze) {
       try {

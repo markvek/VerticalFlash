@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import { extname, join } from "path";
+import { randomUUID } from "crypto";
 import { LIBRARY_DIR, LIBRARY_METADATA_FILE } from "./paths";
 import {
   ClipLibraryZ,
@@ -14,6 +15,17 @@ import {
 
 function emptyLibrary(): ClipLibrary {
   return { videos: [], lastUpdated: new Date().toISOString() };
+}
+
+const state = globalThis as typeof globalThis & { libraryWrite?: Promise<unknown> };
+export async function withLibraryLock<T>(action: () => Promise<T>): Promise<T> {
+  const task = (state.libraryWrite ?? Promise.resolve()).catch(() => {}).then(action);
+  state.libraryWrite = task;
+  try { return await task; } finally { if (state.libraryWrite === task) state.libraryWrite = undefined; }
+}
+
+export class LibraryRecoveryError extends Error {
+  constructor() { super("The clip catalog could not be read. Your footage and catalog have been preserved. Restore the last valid backup or repair the catalog before saving."); }
 }
 
 // Older metadata files named the presence fields after the brand
@@ -44,33 +56,44 @@ export async function loadLibrary(): Promise<ClipLibrary> {
   let raw: string;
   try {
     raw = await fs.readFile(LIBRARY_METADATA_FILE, "utf8");
-  } catch {
-    return emptyLibrary();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyLibrary();
+    throw new LibraryRecoveryError();
   }
   try {
-    const { library, migrated } = upgradeLegacyFields(JSON.parse(raw));
-    if (migrated) {
-      console.log(
-        `[library] Upgraded legacy analysis fields in ${LIBRARY_METADATA_FILE}`
-      );
-      await saveLibrary(library);
-    }
+    const { library } = upgradeLegacyFields(JSON.parse(raw));
     return library;
   } catch (error) {
     console.error(`[library] Could not parse ${LIBRARY_METADATA_FILE}:`, error);
-    return emptyLibrary();
+    throw new LibraryRecoveryError();
   }
 }
 
 export async function saveLibrary(library: ClipLibrary): Promise<void> {
   await fs.mkdir(LIBRARY_DIR, { recursive: true });
-  // Temp-file + rename so a crash mid-write can't truncate the library
-  const tmp = `${LIBRARY_METADATA_FILE}.tmp`;
-  await fs.writeFile(
-    tmp,
-    JSON.stringify(ClipLibraryZ.parse(library), null, 2)
-  );
-  await fs.rename(tmp, LIBRARY_METADATA_FILE);
+  const next = JSON.stringify(ClipLibraryZ.parse(library), null, 2);
+  try {
+    const previous = await fs.readFile(LIBRARY_METADATA_FILE, "utf8");
+    try { upgradeLegacyFields(JSON.parse(previous)); } catch { throw new LibraryRecoveryError(); }
+    const backup = `${LIBRARY_METADATA_FILE}.${randomUUID()}.backup.tmp`;
+    await fs.writeFile(backup, previous);
+    await fs.rename(backup, `${LIBRARY_METADATA_FILE}.bak`);
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const tmp = `${LIBRARY_METADATA_FILE}.${randomUUID()}.tmp`;
+  try { await fs.writeFile(tmp, next); await fs.rename(tmp, LIBRARY_METADATA_FILE); }
+  finally { await fs.unlink(tmp).catch(() => {}); }
+}
+
+export async function restoreLibraryBackup(): Promise<void> {
+  await withLibraryLock(async () => {
+    const backup = await fs.readFile(`${LIBRARY_METADATA_FILE}.bak`, "utf8");
+    upgradeLegacyFields(JSON.parse(backup));
+    const original = await fs.readFile(LIBRARY_METADATA_FILE, "utf8");
+    await fs.writeFile(`${LIBRARY_METADATA_FILE}.preserved-${randomUUID()}`, original);
+    const temp = `${LIBRARY_METADATA_FILE}.${randomUUID()}.tmp`;
+    await fs.writeFile(temp, backup);
+    await fs.rename(temp, LIBRARY_METADATA_FILE);
+  });
 }
 
 export function isVideoFilename(filename: string): boolean {

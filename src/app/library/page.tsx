@@ -2,7 +2,7 @@
 
 import { LibraryUpload } from "@/components/form/LibraryUpload";
 import { useEffect, useRef, useState } from "react";
-import type { LibraryClip, ClipLibrary } from "@/lib/library-schema";
+import { clipDescription, clipTranscript, clipTags, type LibraryClip, type ClipLibrary } from "@/lib/library-schema";
 import { useBrand } from "@/app/context/brand";
 
 export default function LibraryPage() {
@@ -11,7 +11,8 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingFilename, setEditingFilename] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<Partial<LibraryClip>>({});
+  const [editForm, setEditForm] = useState<Partial<LibraryClip> & { spoken_text?: string }>({});
+  const editOriginal = useRef<Record<string, unknown>>({});
   const [analyzing, setAnalyzing] = useState(false);
   const [selectedVideoIndex, setSelectedVideoIndex] = useState(0);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
@@ -37,8 +38,8 @@ export default function LibraryPage() {
     try {
       setLoading(true);
       const res = await fetch("/api/library");
-      if (!res.ok) throw new Error("Failed to load library");
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load library");
       setLibrary(data);
       setError(null);
     } catch (err) {
@@ -56,12 +57,15 @@ export default function LibraryPage() {
 
   const handleEdit = (video: LibraryClip) => {
     setEditingFilename(video.filename);
-    setEditForm({
+    const initial = {
       date: video.date,
-      tags: video.tags || [],
-      description: video.description,
+      tags: clipTags(video),
+      description: clipDescription(video),
+      spoken_text: clipTranscript(video),
       source: video.source,
-    });
+    };
+    editOriginal.current = initial;
+    setEditForm(initial);
   };
 
   const handleSave = async () => {
@@ -69,7 +73,7 @@ export default function LibraryPage() {
 
     const payload = {
       filename: editingFilename,
-      ...editForm,
+      ...Object.fromEntries(Object.entries(editForm).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(editOriginal.current[key]))),
     };
 
     try {
@@ -79,7 +83,7 @@ export default function LibraryPage() {
         body: JSON.stringify(payload),
       });
 
-      if (!res.ok) throw new Error("Failed to save metadata");
+      if (!res.ok) throw new Error((await res.json()).error || "Failed to save metadata");
 
       await loadLibrary();
       setEditingFilename(null);
@@ -151,7 +155,7 @@ export default function LibraryPage() {
             {brand.name} clip library
           </h1>
           <p className="text-sm text-muted-foreground mt-2">
-            {library?.videos.length || 0} videos in library
+            {library?.videos.length || 0} uploaded · {library?.videos.filter(v => v.analysis).length || 0} ready for matching · {library?.videos.filter(v => !v.analysis).length || 0} need analysis
           </p>
         </div>
 
@@ -160,6 +164,11 @@ export default function LibraryPage() {
         {error && (
           <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3">
             <p className="text-sm text-red-500">{error}</p>
+            {error.includes("catalog") && <button className="mt-2 underline" onClick={async () => {
+              try { const r = await fetch("/api/library", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "restore_backup" }) });
+                const data = await r.json(); if (!r.ok) throw new Error(data.error); await loadLibrary();
+              } catch (e) { setError(e instanceof Error ? e.message : "Backup unavailable"); }
+            }}>Restore last valid catalog backup (preserves the current file)</button>}
           </div>
         )}
 
@@ -228,7 +237,7 @@ export default function LibraryPage() {
                           Description
                         </p>
                         <p className="text-sm text-foreground mt-1">
-                          {selectedVideo.description || "No description"}
+                          {clipDescription(selectedVideo) || "No description"}
                         </p>
                       </div>
 
@@ -236,9 +245,9 @@ export default function LibraryPage() {
                         <p className="text-xs font-semibold uppercase text-muted-foreground">
                           Tags
                         </p>
-                        {selectedVideo.tags && selectedVideo.tags.length > 0 ? (
+                        {clipTags(selectedVideo).length > 0 ? (
                           <div className="flex flex-wrap gap-1.5 mt-2">
-                            {selectedVideo.tags.map((tag) => (
+                            {clipTags(selectedVideo).map((tag) => (
                               <span
                                 key={tag}
                                 className="px-2 py-0.5 rounded-full bg-muted text-muted-foreground text-xs"
@@ -272,9 +281,12 @@ export default function LibraryPage() {
                         </p>
                       </div>
 
+                      <div><p className="text-xs font-semibold uppercase text-muted-foreground">Transcript used for planning</p><p className="mt-1 max-h-24 overflow-y-auto text-sm">{clipTranscript(selectedVideo) || "No spoken audio"}</p>
+                        {selectedVideo.corrections && <p className="mt-1 text-xs text-muted-foreground">Your corrections take precedence over AI observations. Last edited {new Date(selectedVideo.corrections.updatedAt).toLocaleString()}.</p>}
+                      </div>
                       <div className="border-t border-border pt-3">
                         <p className="text-xs font-semibold uppercase text-muted-foreground">
-                          Gemini Analysis
+                          Original AI observations
                         </p>
                         {selectedVideo.analysis ? (
                           <div className="flex flex-col gap-2 mt-2">
@@ -293,7 +305,7 @@ export default function LibraryPage() {
                               </span>
                             </div>
                             <p className="text-sm text-foreground">
-                              {selectedVideo.analysis.product_present ? ` in frame` : `No  in frame`}
+                              {selectedVideo.analysis.product_present ? `${brand.productShortName} in frame` : `No ${brand.productShortName} in frame`}
                               {selectedVideo.analysis.product_note && (
                                 <span className="text-muted-foreground">
                                   {" "}— {selectedVideo.analysis.product_note}
@@ -374,7 +386,7 @@ export default function LibraryPage() {
                             ...editForm,
                             date: e.target.value
                               ? new Date(e.target.value).toISOString()
-                              : undefined,
+                              : null,
                           })
                         }
                         className="w-full px-2 py-1 rounded border border-border bg-muted text-foreground text-sm"
@@ -395,10 +407,14 @@ export default function LibraryPage() {
                         }
                         className="w-full px-2 py-1 rounded border border-border bg-muted text-foreground text-sm"
                         rows={3}
-                        placeholder="Video description..."
+                        placeholder="Describe what is actually visible. Your correction guides planning and matching."
                       />
                     </div>
 
+                    <label className="text-xs font-semibold">Corrected transcript
+                      <textarea value={editForm.spoken_text ?? ""} onChange={e => setEditForm({ ...editForm, spoken_text: e.target.value })} rows={3} className="mt-1 w-full rounded border p-2 text-sm" />
+                      <span className="block font-normal text-muted-foreground">Correct words here; this does not invent or change word timestamps.</span>
+                    </label>
                     <div>
                       <label className="text-xs font-semibold uppercase text-muted-foreground">
                         Tags
@@ -477,7 +493,7 @@ export default function LibraryPage() {
                             ...editForm,
                             duration: e.target.value
                               ? parseInt(e.target.value)
-                              : undefined,
+                              : null,
                           })
                         }
                         className="w-full px-2 py-1 rounded border border-border bg-muted text-foreground text-sm"
