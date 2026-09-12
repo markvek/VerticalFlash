@@ -1,15 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowRight, Pencil, Scissors, Trash2 } from "lucide-react";
+import { Pencil } from "lucide-react";
 import type { Beat, Segment } from "@/lib/segments-schema";
 import { FootageThumbnail } from "@/components/ui/FootageThumbnail";
 
-export function StoryboardBeatCard({ beat, segment, index, count, disabled, onSeek, onMove, onRemove, onNote, onTrim }: {
-  beat: Beat; segment?: Segment; index: number; count: number; disabled: boolean;
-  onSeek: () => void; onMove: (to: number) => void; onRemove: () => void; onNote: (note: string) => void;
-  /** Open the length editor for this beat */
-  onTrim?: () => void;
+export function StoryboardBeatCard({ beat, segment, index, disabled, onSeek, onNote }: {
+  beat: Beat; segment?: Segment; index: number; disabled: boolean;
+  onSeek: () => void; onNote: (note: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState(beat.fix_note ?? "");
@@ -23,12 +21,6 @@ export function StoryboardBeatCard({ beat, segment, index, count, disabled, onSe
     <button onClick={onSeek} className="mx-auto" aria-label={`Preview storyboard segment ${index + 1}`}>
       <FootageThumbnail src={beat.thumbnail ?? segment?.thumbnail} alt={`Segment ${index + 1}`} />
     </button>
-    <div className="flex items-center justify-end gap-1">
-      {onTrim && <button disabled={disabled} onClick={onTrim} title="Adjust length" aria-label={`Adjust length of segment ${index + 1}`} className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted disabled:opacity-25"><Scissors className="size-3" /></button>}
-      <button disabled={disabled || index === 0} onClick={() => onMove(index - 1)} title="Move segment left" aria-label={`Move segment ${index + 1} left`} className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted disabled:opacity-25"><ArrowLeft className="size-3" /></button>
-      <button disabled={disabled || index === count - 1} onClick={() => onMove(index + 1)} title="Move segment right" aria-label={`Move segment ${index + 1} right`} className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted disabled:opacity-25"><ArrowRight className="size-3" /></button>
-      <button disabled={disabled || count === 1} onClick={onRemove} title="Remove segment" aria-label={`Remove segment ${index + 1}`} className="grid size-6 place-items-center rounded text-muted-foreground hover:text-red-400 disabled:opacity-25"><Trash2 className="size-3" /></button>
-    </div>
     <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
       <span className="font-mono text-muted-foreground">{time(Math.max(0, beat.start - offset))}-{time(Math.max(0, beat.end - offset))} · {(beat.end - beat.start).toFixed(1)}s</span>
       <span className={`rounded px-1.5 py-0.5 font-semibold uppercase ${roleColor}`}>{role}</span>

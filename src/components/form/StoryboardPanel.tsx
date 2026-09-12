@@ -8,7 +8,7 @@ import { flushSync } from "react-dom";
 import { Dialog } from "radix-ui";
 import { ChevronDown, ChevronRight, Loader2, Play, Plus, Square, X } from "lucide-react";
 import { StoryboardBeatCard } from "./StoryboardBeatCard";
-import { BeatTrimDialog, type BeatTrim } from "./BeatTrimDialog";
+import { useStoryboardReviews } from "./ViralityReviewPanel";
 import { beginMediaPlayback, isCurrentMediaPlayback, subscribeMediaPlayback } from "@/lib/media-playback";
 import type {
   Beat,
@@ -43,6 +43,7 @@ export interface StoryboardPanelProps {
   previewMedia?: ReactNode;
   footagePanel?: ReactNode;
   refreshKey?: number;
+  onOpenReview?: (storyboardId: string) => void;
 }
 
 const ROLE_STYLES: Record<SegmentRole, string> = {
@@ -113,7 +114,7 @@ function beatMatchesSegment(beat: Beat, segment: Segment): boolean {
   );
 }
 
-export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
+export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
   const [model, setModel] = useState("");
   const [segments, setSegments] = useState<MasterSegments | null>(null);
   const [storyboards, setStoryboards] = useState<MasterStoryboards | null>(null);
@@ -126,8 +127,6 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
   const [fullTranscriptOpen, setFullTranscriptOpen] = useState(true);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [segmentPickerOpen, setSegmentPickerOpen] = useState(false);
-  // Which beat of the active storyboard has its length editor open
-  const [trimIndex, setTrimIndex] = useState<number | null>(null);
 
   const [count, setCount] = useState(STORYBOARD_DEFAULT_COUNT);
   const [perIdea, setPerIdea] = useState(false);
@@ -140,6 +139,10 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
   const [brief, setBrief] = useState("");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [addText, setAddText] = useState(false);
+  const [addBroll, setAddBroll] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const reviews = useStoryboardReviews(videoId, storyboards?.storyboards.map(s => `${s.id}:${s.revision ?? 1}`).join(",") ?? "");
 
   const [accepting, setAccepting] = useState<string | null>(null);
   const [acceptedNow, setAcceptedNow] = useState<
@@ -256,6 +259,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       null
     );
   }, [activeStoryboardId, storyboards]);
+  const activeReview = reviews.items.find(i => i.storyboard.id === activeStoryboard?.id && (i.storyboard.revision ?? 1) === (activeStoryboard?.revision ?? 1))?.review;
 
   const saveStoryboard = async (storyboard: Storyboard): Promise<Storyboard> => {
     setSaving(true);
@@ -413,6 +417,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       return;
     }
     setGenerating(true);
+    setNotice(null);
     setError(null);
     stopPreview();
     try {
@@ -427,6 +432,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
       setActiveStoryboardId(data.storyboards?.[0]?.id ?? null);
       setAcceptedNow({});
       setControlsOpen(false);
+      if (data.reviewWarnings?.length) setNotice(`Ideas saved. Some reviews need a retry: ${data.reviewWarnings.join("; ")}`);
       window.dispatchEvent(new Event("downloads-changed"));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Storyboard generation failed");
@@ -438,12 +444,13 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
   const accept = async (sb: Storyboard) => {
     setAccepting(sb.id);
     setError(null);
+    setNotice(null);
     try {
       const saved = await saveStoryboard(sb);
       const res = await fetch(`/api/master/${videoId}/storyboards/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storyboard_id: saved.id }),
+        body: JSON.stringify({ storyboard_id: saved.id, revision: saved.revision ?? 1, add_text: addText && !!activeReview?.text.length, add_broll: addBroll && !!activeReview?.broll.length }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Failed (HTTP ${res.status})`);
@@ -452,6 +459,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
         [saved.id]: { filename: data.filename, displayName: data.displayName },
       }));
       window.dispatchEvent(new Event("downloads-changed"));
+      setNotice(data.warnings?.length ? data.warnings.join(" ") : "Editing project created. Your selected additions are ready to edit.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not cut the short");
     } finally {
@@ -628,7 +636,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
               className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {generating
-                ? "Writing storyboards with Gemini…"
+                ? "Creating storyboards and reviewing hooks…"
                 : storyboards
                   ? "Generate more storyboards"
                   : "Generate storyboards"}
@@ -714,12 +722,10 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
                   const rect = card.getBoundingClientRect();
                   event.dataTransfer.setDragImage(card, Math.max(0, event.clientX - rect.left), Math.max(0, event.clientY - rect.top));
                 }} onDragEnd={clearDrag}>
-                <StoryboardBeatCard beat={beat} segment={segment} index={index} count={activeStoryboard.beats.length} disabled={saving || accepting !== null}
+                <StoryboardBeatCard beat={beat} segment={segment} index={index} disabled={saving || accepting !== null}
                   onSeek={() => onSeek?.(beat.start, beat.source)}
-                  onMove={(to) => reorderBeat(activeStoryboard, index, to)}
-                  onRemove={() => commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.filter((_, i) => i !== index)))}
                   onNote={(note) => commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.map((value, i) => i === index ? { ...value, fix_note: note } : value)))}
-                  onTrim={() => setTrimIndex(index)} />
+                  />
                 </div>
               </Fragment>;
             })}
@@ -728,6 +734,17 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
               className="flex min-h-[348px] w-36 shrink-0 flex-col items-center justify-center gap-4 rounded-lg border border-border px-3 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50">
               <Plus className="size-7" /><span>Add a storyboard segment</span>
             </button>
+          </div>
+          <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <span>{reviews.loading ? "Loading hook review…" : activeReview ? `Hook ${activeReview.assessments.hook.score}/5 · Review ready` : "Review needed for this revision"}</span>
+              {onOpenReview ? <button className="underline" onClick={() => onOpenReview(activeStoryboard.id)}>Virality Review</button> : <a className="underline" href={`/editing/${encodeURIComponent(filename)}?view=virality&storyboard=${encodeURIComponent(activeStoryboard.id)}`}>Virality Review</a>}
+              {!activeReview && !reviews.loading && <button className="underline disabled:opacity-50" disabled={!!reviews.reviewing || saving || !!accepting} onClick={() => reviews.review(activeStoryboard.id)}>{reviews.reviewing ? "Reviewing…" : "Review storyboard"}</button>}
+            </div>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={addText && !!activeReview?.text.length} disabled={!activeReview?.text.length || saving || !!accepting} onChange={e => setAddText(e.target.checked)} />Add recommended on-screen text{activeReview ? ` (${activeReview.text.length})` : ""}</label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={addBroll && !!activeReview?.broll.length} disabled={!activeReview?.broll.length || saving || !!accepting} onChange={e => setAddBroll(e.target.checked)} />Add recommended B-roll{activeReview ? ` (${activeReview.broll.length})` : ""}</label>
+            <p className="text-[11px] text-muted-foreground">Optional additions based on this storyboard review. Text is separate from speech captions. Strong B-roll matches are placed over your original audio; unmatched windows stay as suggestions.</p>
+            {reviews.error && <p role="alert" className="text-xs text-red-400">{reviews.error}</p>}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button onClick={() => previewing ? stopPreview() : preview(activeStoryboard)} disabled={!onSeek}
@@ -742,6 +759,7 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
           </div>
         </div>}
         {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
+        {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
       </section>
 
       <section className="min-w-0 space-y-2 rounded-lg border border-border p-3 lg:col-span-2">
@@ -787,8 +805,8 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
 
       {dragPreview && <div ref={dragPreviewElement} aria-hidden="true" inert
         className="downloads-layout pointer-events-none fixed -left-[10000px] top-0 w-[224px] rounded-lg bg-background text-foreground">
-        <StoryboardBeatCard beat={segmentToBeat(dragPreview)} segment={dragPreview} index={0} count={1} disabled
-          onSeek={() => {}} onMove={() => {}} onRemove={() => {}} onNote={() => {}} />
+        <StoryboardBeatCard beat={segmentToBeat(dragPreview)} segment={dragPreview} index={0} disabled
+          onSeek={() => {}} onNote={() => {}} />
       </div>}
 
       <Dialog.Root open={segmentPickerOpen} onOpenChange={setSegmentPickerOpen}>
@@ -812,44 +830,6 @@ export function StoryboardPanel({ videoId, onSeek, onStopPreview, previewMedia, 
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-
-      {activeStoryboard && trimIndex != null && activeStoryboard.beats[trimIndex] && (() => {
-        const beat = activeStoryboard.beats[trimIndex];
-        // How long the beat's source runs: the master (segments without a
-        // source) or the attached clip it came from
-        const sourceDuration = Math.max(
-          0,
-          ...segments.segments
-            .filter((segment) =>
-              beat.source
-                ? segment.source?.filename === beat.source.filename && segment.source.offset === beat.source.offset
-                : !segment.source
-            )
-            .map((segment) => segment.end_time - (beat.source?.offset ?? 0)),
-          ...(beat.source ? [] : segments.words.map((word) => word.end))
-        );
-        return (
-          <BeatTrimDialog
-            open
-            beat={beat}
-            index={trimIndex}
-            words={segments.words}
-            sentences={segments.sentences}
-            sourceDuration={sourceDuration}
-            onClose={() => setTrimIndex(null)}
-            onSeek={(seconds) => onSeek?.(seconds, beat.source)}
-            onApply={(next: BeatTrim) => {
-              setTrimIndex(null);
-              commitStoryboard(
-                withBeats(
-                  activeStoryboard,
-                  activeStoryboard.beats.map((value, i) => (i === trimIndex ? { ...value, ...next } : value))
-                )
-              );
-            }}
-          />
-        );
-      })()}
     </div>
   );
 }

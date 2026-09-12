@@ -100,7 +100,7 @@ export async function rasterizeTextBlock(
   style: TextStyle
 ): Promise<Buffer> {
   const preset = PRESETS[style.preset];
-  const font = `${preset.fontsize}px ${FONT_STACK}`;
+  const font = `${style.fontSize ?? preset.fontsize}px ${FONT_STACK}`;
 
   const measure = createCanvas(1, 1).getContext("2d");
   measure.font = font;
@@ -158,7 +158,7 @@ export async function rasterizeTextBlock(
       ctx.shadowOffsetX = 0;
       ctx.shadowOffsetY = 0;
     }
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = style.color ?? "#ffffff";
     ctx.fillText(line, centerX, baseline);
     top += rowHeight + preset.lineGap;
   }

@@ -100,15 +100,15 @@ export async function matchBrollSegments(
 ): Promise<Map<string, BrollCandidate[]>> {
   const out = new Map<string, BrollCandidate[]>();
   if (targets.length === 0 || catalog.length === 0) return out;
-  const shotByIndex = new Map(analysis.shots.map((s) => [s.index, s]));
   const numbered = targets.map((t, n) => {
-    const shot = shotByIndex.get(t.segment.anchor.shot_index);
+    const covered = analysis.shots.filter(s => s.start_time < t.resolved.end && s.end_time > t.resolved.start);
+    const shot = covered[0];
     return {
       segment: n,
       phrase: t.segment.phrase || "(no speech under this segment)",
       wants: t.segment.description ?? undefined,
       duration_s: Math.round((t.resolved.end - t.resolved.start) * 10) / 10,
-      shot_context: shot?.description,
+      shot_context: covered.map(s => s.description).join("; "),
       shot_lighting: shot?.time_of_day,
     };
   });

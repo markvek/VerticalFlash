@@ -6,6 +6,11 @@ import { readStoryboards, recordStoryboardEdit } from "@/lib/storyboard-store";
 import { readProjectMeta } from "@/lib/project-meta";
 import { findDownloadFile } from "@/lib/download-files";
 import { buildCutdown } from "@/lib/cutdown-build";
+import { z } from "zod";
+import { StoryboardHandoffZ, type StoryboardHandoff } from "@/lib/virality-schema";
+import { readSavedStoryboard } from "@/lib/storyboard-store";
+import { readViralityReview } from "@/lib/storyboard-virality";
+import { nativeModel } from "@/lib/models/native";
 
 // Cutting the beats is a re-encode of a short's worth of video
 export const maxDuration = 300;
@@ -24,9 +29,13 @@ export async function POST(
   }
 
   let storyboardId: string;
+  let options: StoryboardHandoff;
+  let requestedRevision: number | undefined;
   try {
-    const body = await request.json();
-    storyboardId = typeof body?.storyboard_id === "string" ? body.storyboard_id : "";
+    const body = StoryboardHandoffZ.extend({ storyboard_id: z.string().regex(/^[\w-]+$/), revision: z.number().int().positive().optional() }).parse(await request.json());
+    storyboardId = body.storyboard_id;
+    options = StoryboardHandoffZ.parse(body);
+    requestedRevision = body.revision;
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
@@ -62,6 +71,7 @@ export async function POST(
   if (!storyboard) {
     return NextResponse.json({ error: "Unknown storyboard_id" }, { status: 404 });
   }
+  if (requestedRevision != null && requestedRevision !== (storyboard.revision ?? 1)) return NextResponse.json({ error: "Storyboard changed. Refresh before creating an edit." }, { status: 409 });
 
   const key = `${videoId}:${storyboardId}`;
   if (inFlight.has(key)) {
@@ -72,6 +82,11 @@ export async function POST(
   }
   inFlight.add(key);
   try {
+    const record = (await readSavedStoryboard(videoId, storyboard.id))!;
+    const current = record.storyboards[0];
+    if ((current.revision ?? 1) !== (storyboard.revision ?? 1)) return NextResponse.json({ error: "Storyboard changed. Refresh before creating an edit." }, { status: 409 });
+    const review = await readViralityReview(videoId, current, record.request.brief);
+    if ((options.add_text || options.add_broll) && !review) return NextResponse.json({ error: "Review this storyboard revision before adding recommended text or B-roll." }, { status: 409 });
     const result = await buildCutdown({
       masterPath: file.path,
       masterId: videoId,
@@ -79,6 +94,7 @@ export async function POST(
       masterMeta: meta,
       segments,
       storyboard,
+      handoff: { options, review, model: nativeModel(record.request.model) },
     });
     // Remember which short came from this storyboard
     await recordStoryboardEdit(videoId, storyboard, result.filename);

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, ChevronRight, ClipboardCheck, Film, Home, Menu, RotateCcw, Search, Settings2, Trash2, X } from "lucide-react";
+import { BarChart3, ChevronRight, ClipboardCheck, Film, Home, Menu, PanelLeftClose, PanelLeftOpen, RotateCcw, Search, Settings2, Trash2, X } from "lucide-react";
 import { useScanHistory } from "@/app/context/scan-history";
 import type { DownloadEntry } from "@/lib/download-types";
 import { projectHref, projectStage } from "@/lib/project-navigation";
@@ -14,9 +14,19 @@ export function HistorySidebar() {
   const [files, setFiles] = useState<DownloadEntry[]>([]);
   const [open, setOpen] = useState({ scans: true, storyboarding: true, editing: true });
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+
+  useEffect(() => {
+    try { setCollapsed(localStorage.getItem("navigation-collapsed") === "true"); } catch { /* Storage may be unavailable. */ }
+  }, []);
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try { localStorage.setItem("navigation-collapsed", String(next)); } catch { /* Keep the in-session choice. */ }
+  };
 
   const loadProjects = useCallback(async () => {
     try {
@@ -90,12 +100,19 @@ export function HistorySidebar() {
       </button>
       {mobileOpen && <button aria-label="Close navigation" onClick={closeMobile} className="fixed inset-0 z-40 bg-black/30 md:hidden" />}
       <aside aria-label="Main navigation"
-        className={`${mobileOpen ? "fixed inset-y-0 left-0 z-50 block" : "hidden"} w-56 shrink-0 border-r border-border bg-card md:sticky md:top-0 md:block md:h-screen`}>
-        <nav className="h-full space-y-4 overflow-y-auto p-4" onClick={(event) => {
-          if ((event.target as HTMLElement).closest("a")) closeMobile();
-        }}>
+        className={`${mobileOpen ? "fixed inset-y-0 left-0 z-50 flex" : "hidden"} w-56 shrink-0 flex-col border-r border-border bg-card md:sticky md:top-0 md:flex md:h-screen ${collapsed ? "md:w-14" : "md:w-56"}`}>
+        <div className="flex shrink-0 items-center p-3">
+          <button type="button" onClick={toggleCollapsed} aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+            title={collapsed ? "Expand navigation" : "Collapse navigation"} aria-expanded={!collapsed} aria-controls="site-navigation"
+            className="ml-auto hidden size-8 items-center justify-center rounded-md hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary md:flex">
+            {collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
+          </button>
           <button onClick={closeMobile} aria-label="Close navigation" title="Close navigation"
             className="ml-auto flex size-8 items-center justify-center md:hidden"><X className="size-4" /></button>
+        </div>
+        <nav id="site-navigation" className={`min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-4 ${collapsed ? "md:hidden" : ""}`} onClick={(event) => {
+          if ((event.target as HTMLElement).closest("a")) closeMobile();
+        }}>
           <div className="space-y-1">
             <Link href="/" className={navClass}><Home className="size-4 shrink-0" />Start</Link>
             <Link href="/scan" className={navClass}><Search className="size-4 shrink-0" />New scan</Link>

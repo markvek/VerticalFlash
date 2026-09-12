@@ -12,6 +12,16 @@ import { sidecarPath } from "./paths";
 
 export const BrollAnchorZ = z.discriminatedUnion("kind", [
   z.object({
+    kind: z.literal("span"),
+    shot_index: z.number().int().nonnegative(),
+    end_shot_index: z.number().int().nonnegative(),
+    offset: z.number().finite().nonnegative(),
+    end_offset: z.number().finite().nonnegative(),
+    start_word: z.number().int().nonnegative().optional(),
+    end_word: z.number().int().nonnegative().optional(),
+    invalidReason: z.string().optional(),
+  }),
+  z.object({
     kind: z.literal("words"),
     shot_index: z.number().int().nonnegative(),
     start_word: z.number().int().nonnegative(),

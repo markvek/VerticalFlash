@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Clapperboard, Film, LoaderCircle, RotateCcw, Upload } from "lucide-react";
 import { StoryboardPanel } from "./StoryboardPanel";
+import { ViralityReviewPanel } from "./ViralityReviewPanel";
 import { StoryboardFootagePanel } from "./StoryboardFootagePanel";
 import type { DownloadEntry } from "@/lib/download-types";
 import type { FootageSource } from "@/lib/segments-schema";
@@ -13,7 +14,8 @@ import { beginMediaPlayback, isCurrentMediaPlayback, playMedia } from "@/lib/med
 export function StoryboardWorkspace({ filename }: { filename: string }) {
   const [project, setProject] = useState<DownloadEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"storyboarding" | "upload" | "add">("storyboarding");
+  const [tab, setTab] = useState<"storyboarding" | "upload" | "add" | "virality">("storyboarding");
+  const [reviewStoryboardId, setReviewStoryboardId] = useState<string>();
   const [revision, setRevision] = useState(0);
   const [source, setSource] = useState<FootageSource | undefined>();
   const [mediaError, setMediaError] = useState(false);
@@ -104,8 +106,8 @@ export function StoryboardWorkspace({ filename }: { filename: string }) {
     <header className="mb-5">
       <h1 className="text-xl font-semibold">Storyboard</h1>
       <p className="mt-2 truncate text-xs text-muted-foreground" title={project?.displayName ?? job?.title ?? filename}>{project?.displayName ?? job?.title ?? filename}</p>
-      <div role="tablist" aria-label="Storyboard workspace" className="mt-3 grid grid-cols-3 overflow-hidden rounded-lg border border-border text-[11px] font-semibold sm:inline-flex sm:text-xs">
-        {([{ id: "storyboarding", label: "Storyboarding", Icon: Clapperboard }, { id: "upload", label: "Upload Footage", Icon: Upload }, { id: "add", label: "Add Footage", Icon: Film }] as const).map(({ id, label, Icon }) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} className={`flex min-w-0 flex-col items-center justify-center gap-1 border-r border-border px-1 py-2.5 last:border-0 sm:flex-row sm:gap-1.5 sm:px-3 ${tab === id ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}><Icon className="size-3.5 shrink-0" />{label}</button>)}
+      <div role="tablist" aria-label="Storyboard workspace" className="mt-3 grid grid-cols-2 overflow-hidden rounded-lg border border-border text-[11px] font-semibold sm:inline-flex sm:text-xs">
+        {([{ id: "storyboarding", label: "Storyboarding", Icon: Clapperboard }, { id: "virality", label: "Virality Review", Icon: Clapperboard }, { id: "upload", label: "Upload Footage", Icon: Upload }, { id: "add", label: "Add Footage", Icon: Film }] as const).map(({ id, label, Icon }) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} className={`flex min-w-0 flex-col items-center justify-center gap-1 border-r border-border px-1 py-2.5 last:border-0 sm:flex-row sm:gap-1.5 sm:px-3 ${tab === id ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}><Icon className="size-3.5 shrink-0" />{label}</button>)}
       </div>
     </header>
     {processing && <p role="status" className="mb-4 flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle aria-hidden="true" className="size-4 shrink-0 animate-spin" />{job.status === "preparing" ? "Preparing footage..." : "Transcribing and segmenting footage..."}</p>}
@@ -138,8 +140,9 @@ export function StoryboardWorkspace({ filename }: { filename: string }) {
       finally { setAnalyzing(false); }
     }} className="mb-4 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">{analyzing ? "Analyzing footage..." : "Analyze footage"}</button>}
     {error && <p role="alert" className="mb-4 text-sm text-red-400">{error}</p>}
-    {!project?.videoId ? !job && !error && <p role="status" className="text-sm text-muted-foreground">Loading storyboard...</p> : processing ? preview : <StoryboardPanel
+    {!project?.videoId ? !job && !error && <p role="status" className="text-sm text-muted-foreground">Loading storyboard...</p> : processing ? preview : tab === "virality" ? <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">{preview}<ViralityReviewPanel videoId={project.videoId} storyboardId={reviewStoryboardId} onSeek={seek} /></div> : <StoryboardPanel
       key={project.videoId} videoId={project.videoId} filename={filename} previewMedia={preview} refreshKey={revision} onSeek={seek} onStopPreview={stopPreview}
+      onOpenReview={id => { stopPreview(); setReviewStoryboardId(id); setTab("virality"); }}
       footagePanel={tab !== "storyboarding" ? <StoryboardFootagePanel videoId={project.videoId} mode={tab} onIncluded={() => { setRevision((value) => value + 1); window.dispatchEvent(new Event("downloads-changed")); }} /> : undefined}
     />}
   </div>;

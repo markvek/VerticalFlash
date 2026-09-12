@@ -1,3 +1,4 @@
+import { textOverlaysPath } from "@/lib/text-overlays-store";
 import { NextRequest, NextResponse } from "next/server";
 import { readFraming } from "@/lib/framing-store";
 import { shotSources } from "@/lib/framing-sources";
@@ -15,7 +16,6 @@ import { EditNotesZ, editNotesPath } from "@/lib/edit-notes";
 import { isValidMusicFilename } from "@/lib/music-schema";
 import {
   TextOverlaysZ,
-  textOverlaysPath,
   type TextOverlays,
 } from "@/lib/text-overlays-schema";
 import { ANALYSIS_DIR } from "@/lib/paths";
@@ -151,6 +151,8 @@ export async function POST(
     if (meta?.kind === "cutdown") {
       analysis = withSourceRanges(analysis, meta);
       sourceShots = await cutdownSourceShots(meta);
+    } else if (analysis.shots.some(s => s.source_start != null)) {
+      sourceShots = analysis.shots.map(s => ({ path: videoPath, filename: basename(videoPath), start: s.source_start ?? s.start_time, end: s.source_end ?? s.end_time, bounds: { min: 0, max: Infinity } }));
     }
 
     // The B-roll track: placed segments with a clip, resolved onto the
@@ -193,6 +195,7 @@ export async function POST(
       musicFilename,
       burnText,
       textOverlays,
+      textWords: words?.map(w => ({ text: w.word, start: w.start, end: w.end })),
       sourceShots,
       broll,
     });

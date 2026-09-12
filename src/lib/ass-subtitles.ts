@@ -10,6 +10,7 @@ export interface AssEvent {
   start: number; // seconds on the output timeline
   end: number;
   text: string;
+  style?: TextStyle;
 }
 
 // ASS colors are &HAABBGGRR — alpha 00 = opaque, FF = fully transparent
@@ -109,10 +110,17 @@ export function buildAssSubtitles(events: AssEvent[], style: TextStyle): string 
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
   ];
-  for (const e of events) {
-    lines.push(
-      `Dialogue: 0,${assTime(e.start)},${assTime(e.end)},Default,,0,0,0,,${assText(e.text)}`
-    );
+  const color = (value: string) => `&H00${value.slice(5,7)}${value.slice(3,5)}${value.slice(1,3)}`;
+  const eventStyle = (value: TextStyle, name: string) => {
+    const spec = PRESETS[value.preset];
+    const pos = POSITIONS[value.position];
+    return `Style: ${name},Arial Black,${value.fontSize ?? spec.fontsize},${value.color ? color(value.color) : WHITE},${WHITE},${spec.outlineColour},${spec.backColour},-1,0,0,0,100,100,0,0,${spec.borderStyle},${spec.outline},${spec.shadow},${pos.alignment},90,90,${pos.marginV},1`;
+  };
+  // Each cue may have a per-shot style, including in the fallback engine.
+  const eventIndex = lines.indexOf("[Events]");
+  lines.splice(eventIndex - 1, 0, ...events.map((e, i) => eventStyle(e.style ?? style, `Cue${i}`)));
+  for (const [i, e] of events.entries()) {
+    lines.push(`Dialogue: 0,${assTime(e.start)},${assTime(e.end)},Cue${i},,0,0,0,,${assText(e.text)}`);
   }
   return lines.join("\n") + "\n";
 }

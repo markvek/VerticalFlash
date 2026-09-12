@@ -1,3 +1,4 @@
+import { withProjectEdit } from "@/lib/project-edit-lock";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { EditNotesZ, editNotesPath, type EditNotes } from "@/lib/edit-notes";
@@ -23,7 +24,7 @@ export async function GET(
 }
 
 // Save/clear the fix note for one shot
-export async function PATCH(
+async function patch(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -68,4 +69,9 @@ export async function PATCH(
   await fs.rename(tmp, path);
 
   return NextResponse.json(stored);
+}
+
+export async function PATCH(request: NextRequest, context: { params: Promise<{ videoId: string }> }) {
+  const { videoId } = await context.params;
+  return withProjectEdit(videoId, () => patch(request, context));
 }

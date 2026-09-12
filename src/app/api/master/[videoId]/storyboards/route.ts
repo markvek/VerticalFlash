@@ -18,7 +18,8 @@ import { readProjectMeta } from "@/lib/project-meta";
 import { findDownloadFile } from "@/lib/download-files";
 import { probeDuration } from "@/lib/master-assemble";
 import { loadCatalogSummary } from "@/lib/shot-plan";
-import { updateSavedStoryboard } from "@/lib/storyboard-store";
+import { updateSavedStoryboard, readSavedStoryboard } from "@/lib/storyboard-store";
+import { reviewStoryboard } from "@/lib/storyboard-virality";
 import { resolveWordBeat } from "@/lib/word-range";
 
 export const maxDuration = 300;
@@ -125,7 +126,20 @@ export async function POST(
       catalog = all.filter((c) => !own.has(c.filename));
     }
     const doc = await generateStoryboards(ai, segments, req, duration, catalog);
-    return NextResponse.json(await writeStoryboards(doc));
+    const saved = await writeStoryboards(doc);
+    // Ideas remain saved and usable even if the separate review call fails.
+    const reviewWarnings: string[] = [];
+    if (!storyboardDryRun()) {
+      for (const idea of doc.storyboards) {
+        try {
+          const record = (await readSavedStoryboard(videoId, idea.id))!;
+          await reviewStoryboard(record, record.storyboards[0], segments, ai!);
+        } catch (error) {
+          reviewWarnings.push(`${idea.title}: ${error instanceof Error ? error.message : "Review unavailable"}`);
+        }
+      }
+    }
+    return NextResponse.json({ ...saved, reviewWarnings });
   } catch (error) {
     console.error("storyboard generation failed:", error);
     const { kind } = classifyGeminiError(error);
