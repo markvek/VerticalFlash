@@ -1,3 +1,5 @@
+import { trackedRoute } from "@/lib/tracked-route";
+import { editRevision, exportState } from "@/lib/export-state";
 import { textOverlaysPath } from "@/lib/text-overlays-store";
 import { NextRequest, NextResponse } from "next/server";
 import { readFraming } from "@/lib/framing-store";
@@ -48,7 +50,8 @@ export async function GET(
 
   try {
     const raw = await fs.readFile(renderManifestPath(videoId), "utf8");
-    return NextResponse.json(JSON.parse(raw));
+    const manifest = JSON.parse(raw);
+    return NextResponse.json({ ...manifest, state: await exportState(manifest) });
   } catch {
     return NextResponse.json(
       { error: "No render found for this video" },
@@ -57,7 +60,7 @@ export async function GET(
   }
 }
 
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -105,6 +108,7 @@ export async function POST(
       return ffmpegErrorResponse(error)!;
     }
 
+    const revision = await editRevision(videoId);
     let analysis: Analysis;
     try {
       const raw = await fs.readFile(
@@ -160,6 +164,8 @@ export async function POST(
     const brollTrack = await readBrollTrack(videoId);
     const words = meta?.kind === "cutdown" ? ((await readMasterSegments(meta.masterId))?.words ?? null) : null;
     const brollResolved = new Map(resolveBrollTrack(brollTrack, analysis.shots, words).map((r) => [r.id, r]));
+    const invalidBroll = brollTrack.segments.filter(s => s.status === "placed" && (!s.clip || !brollResolved.get(s.id)?.valid));
+    if (invalidBroll.length) return NextResponse.json({ error: `${invalidBroll.length} placed B-roll segment(s) have missing clips or invalid timing. Adjust or remove them before rendering.` }, { status: 422 });
     const broll: BrollRenderSegment[] = brollTrack.segments.flatMap((s) => {
       const r = brollResolved.get(s.id);
       if (s.status !== "placed" || !s.clip || !r?.valid) return [];
@@ -170,7 +176,8 @@ export async function POST(
     try {
       const raw = await fs.readFile(editNotesPath(videoId), "utf8");
       editNotes = EditNotesZ.parse(JSON.parse(raw)).notes;
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Saved clip instructions are unreadable. Repair them before rendering.");
       // no notes saved yet
     }
 
@@ -178,11 +185,13 @@ export async function POST(
     try {
       const raw = await fs.readFile(textOverlaysPath(videoId), "utf8");
       textOverlays = TextOverlaysZ.parse(JSON.parse(raw));
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Saved text overlays are unreadable. Repair them before rendering.");
       // none saved — the burn falls back to the analysis's detected text
     }
 
     const manifest = await renderRemake({
+      editRevision: revision,
       framing,
       originalSources: await shotSources(videoPath, analysis),
       videoId,
@@ -200,7 +209,7 @@ export async function POST(
       broll,
     });
 
-    return NextResponse.json(manifest);
+    return NextResponse.json({ ...manifest, state: await exportState(manifest) });
   } catch (error) {
     console.error("render failed:", error);
     return NextResponse.json(
@@ -211,3 +220,5 @@ export async function POST(
     inFlight.delete(videoId);
   }
 }
+
+export const POST = trackedRoute("Render preview", handlePost);

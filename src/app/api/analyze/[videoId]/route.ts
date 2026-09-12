@@ -1,3 +1,5 @@
+import { assertAnalysisReplaceable } from "@/lib/analysis-replacement";
+import { trackedRoute } from "@/lib/tracked-route";
 import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -215,7 +217,7 @@ export async function GET(
       join(ANALYSIS_DIR, `${videoId}.json`),
       "utf8"
     );
-    analysis = JSON.parse(raw);
+    analysis = AnalysisZ.parse(JSON.parse(raw));
   } catch {
     return NextResponse.json(
       { error: "No analysis found for this video" },
@@ -370,7 +372,7 @@ export async function PATCH(
   return NextResponse.json(meta?.kind === "cutdown" ? withSourceRanges(analysis, meta) : analysis);
 }
 
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -395,6 +397,9 @@ export async function POST(
     );
   }
 
+  try { await assertAnalysisReplaceable(videoId); } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Existing edits must be preserved" }, { status: 409 });
+  }
   const meta = await readMetadata(videoPath);
   // Projects started from a brief (/create) have a placeholder source —
   // their shots are planned from the brief and the song, not from footage.
@@ -506,10 +511,10 @@ export async function POST(
     await fs.mkdir(ANALYSIS_DIR, { recursive: true });
     await fs.writeFile(
       join(ANALYSIS_DIR, `${videoId}.json`),
-      JSON.stringify(stored, null, 2)
+      JSON.stringify(AnalysisZ.parse(stored), null, 2)
     );
 
-    return NextResponse.json(stored);
+    return NextResponse.json(AnalysisZ.parse(stored));
   } catch (error) {
     console.error("analyze failed:", error);
     return NextResponse.json(
@@ -527,3 +532,5 @@ export async function POST(
     }
   }
 }
+
+export const POST = trackedRoute("Analyze footage", handlePost);

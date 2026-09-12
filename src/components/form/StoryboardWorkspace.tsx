@@ -1,5 +1,6 @@
 "use client";
 
+import { WorkflowActivity } from "@/components/form/WorkflowActivity";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Clapperboard, Film, LoaderCircle, RotateCcw, Upload } from "lucide-react";
 import { StoryboardPanel } from "./StoryboardPanel";
@@ -110,6 +111,7 @@ export function StoryboardWorkspace({ filename }: { filename: string }) {
         {([{ id: "storyboarding", label: "Storyboarding", Icon: Clapperboard }, { id: "virality", label: "Virality Review", Icon: Clapperboard }, { id: "upload", label: "Upload Footage", Icon: Upload }, { id: "add", label: "Add Footage", Icon: Film }] as const).map(({ id, label, Icon }) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} className={`flex min-w-0 flex-col items-center justify-center gap-1 border-r border-border px-1 py-2.5 last:border-0 sm:flex-row sm:gap-1.5 sm:px-3 ${tab === id ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}><Icon className="size-3.5 shrink-0" />{label}</button>)}
       </div>
     </header>
+    {project?.videoId && <WorkflowActivity videoId={project.videoId} />}
     {processing && <p role="status" className="mb-4 flex items-center gap-2 text-sm text-muted-foreground"><LoaderCircle aria-hidden="true" className="size-4 shrink-0 animate-spin" />{job.status === "preparing" ? "Preparing footage..." : "Transcribing and segmenting footage..."}</p>}
     {job?.status === "failed" && <div className="mb-4 space-y-2">
       <p role="alert" className="text-sm text-red-400">{job.error}</p>
@@ -141,7 +143,7 @@ export function StoryboardWorkspace({ filename }: { filename: string }) {
     }} className="mb-4 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">{analyzing ? "Analyzing footage..." : "Analyze footage"}</button>}
     {error && <p role="alert" className="mb-4 text-sm text-red-400">{error}</p>}
     {!project?.videoId ? !job && !error && <p role="status" className="text-sm text-muted-foreground">Loading storyboard...</p> : processing ? preview : tab === "virality" ? <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">{preview}<ViralityReviewPanel videoId={project.videoId} storyboardId={reviewStoryboardId} onSeek={seek} /></div> : <StoryboardPanel
-      key={project.videoId} videoId={project.videoId} filename={filename} previewMedia={preview} refreshKey={revision} onSeek={seek} onStopPreview={stopPreview}
+      key={project.videoId} videoId={project.videoId} filename={filename} previewMedia={preview} previewVideoRef={video} refreshKey={revision} onSeek={seek} onStopPreview={stopPreview}
       onOpenReview={id => { stopPreview(); setReviewStoryboardId(id); setTab("virality"); }}
       footagePanel={tab !== "storyboarding" ? <StoryboardFootagePanel videoId={project.videoId} mode={tab} onIncluded={() => { setRevision((value) => value + 1); window.dispatchEvent(new Event("downloads-changed")); }} /> : undefined}
     />}

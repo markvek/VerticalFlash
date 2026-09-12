@@ -1,3 +1,4 @@
+import { clipDescription, clipTags } from "./library-schema";
 import { randomUUID } from "crypto";
 import { createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
@@ -48,8 +49,8 @@ export async function loadBrollCatalog(): Promise<CatalogClip[]> {
       location: v.analysis!.location,
       time_of_day: v.analysis!.time_of_day,
       product_present: v.analysis!.product_present,
-      description: v.analysis!.description,
-      tags: Array.from(new Set([...(v.tags ?? []), ...v.analysis!.suggested_tags])),
+      description: clipDescription(v),
+      tags: clipTags(v),
     }));
 }
 

@@ -48,9 +48,9 @@ async function patch(
       { status: 400 }
     );
   }
-  if (note.length > 500) {
+  if (note.length > 2000) {
     return NextResponse.json(
-      { error: "Note is too long (max 500 characters)" },
+      { error: "Note is too long (max 2000 characters)" },
       { status: 400 }
     );
   }

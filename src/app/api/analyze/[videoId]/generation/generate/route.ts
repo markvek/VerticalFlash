@@ -42,10 +42,12 @@ export async function POST(
   }
 
   let shotIndex: number;
+  let requestedPrompt: string | undefined;
   let useReferences = true;
   try {
     const body = await request.json();
     shotIndex = body.shot_index;
+    if (typeof body.prompt === "string") requestedPrompt = body.prompt.trim().slice(0, 4000);
     if (body.use_references === false) useReferences = false;
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
@@ -67,7 +69,7 @@ export async function POST(
   }
 
   const generations = await loadGenerations(videoId);
-  const prompt = generations.shots[String(shotIndex)]?.prompt?.trim();
+  const prompt = requestedPrompt ?? generations.shots[String(shotIndex)]?.prompt?.trim();
   if (!prompt) {
     return NextResponse.json(
       { error: "No generation prompt for this shot — draft one first" },

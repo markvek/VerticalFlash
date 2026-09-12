@@ -1,3 +1,6 @@
+import { randomUUID } from "crypto";
+import { exportPaths } from "./export-state";
+import { withProjectEdit } from "./project-edit-lock";
 import { promises as fs } from "fs";
 import { PUBLISH_STORE_PATH, sidecarPath } from "./paths";
 import { z } from "zod";
@@ -10,6 +13,8 @@ import { renderManifestPath } from "./render-remake";
 
 export const PublishRecordZ = z.object({
   videoId: z.string(),
+  exportId: z.string().optional(),
+  sourceVideo: z.string().nullable().optional(),
   // Render version uploaded (1 until versioning lands; manifests without a
   // version field are implicitly v1)
   version: z.number(),
@@ -44,18 +49,21 @@ export async function readPublishStore(): Promise<PublishStore> {
   try {
     const raw = await fs.readFile(storePath(), "utf8");
     return PublishStoreZ.parse(JSON.parse(raw));
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("The upload history could not be read. Preserve and repair publishes.json before saving.");
     return structuredClone(EMPTY_STORE);
   }
 }
 
 async function appendPublishRecord(record: PublishRecord): Promise<void> {
+  await withProjectEdit("publish-history", async () => {
   const store = await readPublishStore();
   store.publishes.push(PublishRecordZ.parse(record));
   const path = storePath();
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(store, null, 2));
   await fs.rename(tmp, path);
+  });
 }
 
 // Record a successful upload, snapshotting the render manifest and caption
@@ -66,14 +74,17 @@ export async function recordPublish(opts: {
   videoId: string;
   publishId: string;
   status: string;
+  exportId?: string;
 }): Promise<void> {
   try {
     let version = 1;
+    let sourceVideo: string | null = null;
     let renderedAt: string | null = null;
     let durationSeconds: number | null = null;
     try {
-      const raw = await fs.readFile(renderManifestPath(opts.videoId), "utf8");
+      const raw = await fs.readFile(opts.exportId ? exportPaths(opts.videoId, opts.exportId).manifest : renderManifestPath(opts.videoId), "utf8");
       const manifest = JSON.parse(raw);
+      sourceVideo = manifest.sourceVideo ?? null;
       if (typeof manifest?.version === "number") version = manifest.version;
       if (typeof manifest?.renderedAt === "string")
         renderedAt = manifest.renderedAt;
@@ -102,6 +113,7 @@ export async function recordPublish(opts: {
 
     await appendPublishRecord({
       videoId: opts.videoId,
+      exportId: opts.exportId, sourceVideo,
       version,
       publishId: opts.publishId,
       uploadedAt: new Date().toISOString(),
@@ -113,4 +125,14 @@ export async function recordPublish(opts: {
   } catch (error) {
     console.error("Failed to record publish (upload unaffected):", error);
   }
+}
+
+export async function updatePublishStatus(publishId: string, status: string) {
+  await withProjectEdit("publish-history", async () => {
+    const store = await readPublishStore(); const record = store.publishes.find(r => r.publishId === publishId);
+    if (!record) throw new Error("Upload record not found");
+    record.status = status;
+    const temp = `${storePath()}.${randomUUID()}.tmp`;
+    await fs.writeFile(temp, JSON.stringify(store, null, 2)); await fs.rename(temp, storePath());
+  });
 }

@@ -1,3 +1,5 @@
+import { exportPaths, exportState } from "@/lib/export-state";
+import { renderManifestPath } from "@/lib/render-remake";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { renderVideoPath } from "@/lib/render-remake";
@@ -13,7 +15,17 @@ export async function GET(
       return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
     }
 
-    const filePath = renderVideoPath(videoId);
+    const exportId = request.nextUrl.searchParams.get("export");
+    if (exportId && !/^[a-f0-9-]{36}$/.test(exportId)) return NextResponse.json({ error: "Invalid export ID" }, { status: 400 });
+    const download = request.nextUrl.searchParams.get("download") === "1";
+    const manifestPath = exportId ? exportPaths(videoId, exportId).manifest : renderManifestPath(videoId);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    if (download) {
+      const state = await exportState(manifest);
+      if (!state.ready) return NextResponse.json({ error: state.stale ? "Render your latest changes before downloading." : "Resolve the export issues before downloading.", issues: state.issues }, { status: 409 });
+    }
+    const selectedExport = exportId ?? manifest.exportId;
+    const filePath = selectedExport ? exportPaths(videoId, selectedExport).video : renderVideoPath(videoId);
     const fileBuffer = await fs.readFile(filePath).catch(() => null);
     if (!fileBuffer) {
       return NextResponse.json(
@@ -61,11 +73,12 @@ export async function GET(
       headers: {
         "Content-Type": "video/mp4",
         "Content-Length": fileBuffer.length.toString(),
-        "Content-Disposition": `inline; filename="remake-${videoId}.mp4"`,
+        "Content-Disposition": `${download ? "attachment" : "inline"}; filename="remake-${videoId}.mp4"`,
         "Accept-Ranges": "bytes",
       },
     });
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return NextResponse.json({ error: "Export not found" }, { status: 404 });
     console.error("Failed to serve render:", error);
     return NextResponse.json(
       { error: "Failed to load render" },

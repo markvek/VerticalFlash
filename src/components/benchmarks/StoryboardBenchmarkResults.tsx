@@ -167,7 +167,7 @@ export function StoryboardBenchmarkResults({
               <div className="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs">
                 <p className="flex items-center justify-between font-medium">
                   <span>
-                    AI virality
+                    AI text assessment
                     {aiReview?.winnerVariantId === v.id && (
                       <span className="ml-1 rounded bg-primary px-1 text-primary-foreground">
                         top pick
@@ -179,7 +179,7 @@ export function StoryboardBenchmarkResults({
                   </span>
                 </p>
                 <p className="mt-1 text-muted-foreground">
-                  {aiByVariant.get(v.id)!.rationale}
+                  Text only; not a prediction of views or engagement. {aiByVariant.get(v.id)!.rationale}
                 </p>
               </div>
             )}

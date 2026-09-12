@@ -336,7 +336,7 @@ export default function StoryboardPage() {
           {/* Title */}
           <section className="space-y-2">
             <label htmlFor="master-title" className="text-sm font-semibold">
-              3. Master title
+              3. Source project name
             </label>
             <input
               id="master-title"
@@ -423,7 +423,7 @@ export default function StoryboardPage() {
               disabled={!canSubmit}
               className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {submitting ? "Opening..." : "Build master and analyze"}
+              {submitting ? "Opening..." : "Prepare footage and transcript"}
             </button>
             <button
               type="button"

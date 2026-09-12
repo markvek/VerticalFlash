@@ -4,6 +4,7 @@
 //
 // These figures drift; check https://ai.google.dev/gemini-api/docs/pricing
 // and override via env if they are out of date.
+export const GEMINI_PRICING_MODEL = "gemini-3.6-flash";
 export const GEMINI_PRICE_IN_PER_M = envPrice("NEXT_PUBLIC_GEMINI_PRICE_IN_PER_M") ?? 1.5;
 export const GEMINI_PRICE_OUT_PER_M = envPrice("NEXT_PUBLIC_GEMINI_PRICE_OUT_PER_M") ?? 7.5;
 

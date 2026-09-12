@@ -1,3 +1,4 @@
+import { assertAnalysisReplaceable } from "./analysis-replacement";
 import { promises as fs } from "fs";
 import { randomUUID } from "crypto";
 import { join } from "path";
@@ -187,6 +188,7 @@ export async function writeCutdownArtifacts(
   meta: CutdownProjectMeta,
   duration: number
 ): Promise<Analysis> {
+  await assertAnalysisReplaceable(videoId);
   const analysis = analysisFromCutdown(videoId, meta, duration);
   await extractScreenshots(videoPath, videoId, analysis.shots, duration);
   await fs.mkdir(ANALYSIS_DIR, { recursive: true });

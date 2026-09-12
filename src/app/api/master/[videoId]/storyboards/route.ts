@@ -1,4 +1,5 @@
-import { nativeModel } from "@/lib/models/native";
+import { trackedRoute } from "@/lib/tracked-route";
+import { projectModel, saveProjectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import type { GoogleGenAI } from "@google/genai";
@@ -42,7 +43,7 @@ export async function GET(
 }
 
 // Generate additional, independently saved ideas for a master.
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -99,7 +100,9 @@ export async function POST(
 
   let ai: GoogleGenAI | null = null;
   try {
-    ai = getGeminiClient(nativeModel(req.model ?? meta.model));
+    const selectedModel = await projectModel(videoId, req.model);
+    ai = getGeminiClient(selectedModel);
+    await saveProjectModel(videoId, selectedModel);
   } catch (error) {
     if (!storyboardDryRun()) {
       return NextResponse.json(
@@ -160,6 +163,7 @@ export async function POST(
 
 const StoryboardEditZ = z.object({
   storyboard_id: z.string().min(1),
+  revision: z.number().int().positive().optional(),
   beats: z.array(BeatZ).min(1),
 });
 
@@ -230,14 +234,19 @@ export async function PATCH(
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid footage" }, { status: 400 });
   }
-  const updated = await updateSavedStoryboard(videoId, parsed.storyboard_id, (saved) => {
+  let updated;
+  try { updated = await updateSavedStoryboard(videoId, parsed.storyboard_id, (saved) => {
+    if (parsed.revision != null && parsed.revision !== (saved.storyboards[0].revision ?? 1)) throw new Error("This storyboard changed elsewhere. Reload before editing.");
     saved.storyboards[0] = normalizeEditableStoryboard({
       ...saved.storyboards[0],
       beats,
     });
   });
+  } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : "Could not save storyboard" }, { status: 409 }); }
   return NextResponse.json({
     storyboard: updated?.storyboards.find((idea) => idea.id === parsed.storyboard_id),
     storyboards: updated,
   });
 }
+
+export const POST = trackedRoute("Generate storyboards", handlePost);

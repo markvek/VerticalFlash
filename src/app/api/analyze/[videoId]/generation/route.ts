@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   loadGenerations,
-  saveGenerations,
+  mutateGenerations,
   getOrCreateShot,
 } from "@/lib/generation-store";
 
@@ -50,13 +50,13 @@ export async function PATCH(
     );
   }
 
-  const generations = await loadGenerations(videoId);
-  const shot = getOrCreateShot(generations, shotIndex);
+  const generations = await mutateGenerations(videoId, current => {
+  const shot = getOrCreateShot(current, shotIndex);
   shot.prompt = prompt;
   // An edited prompt survives batch re-drafts; clearing it hands the shot
   // back to the next draft pass
   shot.prompt_source = prompt ? "user" : "gemini";
-  await saveGenerations(generations);
+  });
 
   return NextResponse.json(generations);
 }

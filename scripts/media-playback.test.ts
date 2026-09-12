@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { beginMediaPlayback, installMediaPlaybackGuard, isCurrentMediaPlayback, playMedia } from "../src/lib/media-playback";
+import { beginMediaPlayback, preservePlaybackOnPause, installMediaPlaybackGuard, isCurrentMediaPlayback, playMedia } from "../src/lib/media-playback";
 
 class TestDocument extends EventTarget {
   body = {};
@@ -99,4 +99,14 @@ test("leaving the page cancels delayed starts and pauses detached players", asyn
   beginMediaPlayback();
   assert.equal(first.paused, true);
   assert.equal(isCurrentMediaPlayback(request), false);
+});
+
+test("a playback-driven sequence pauses and resumes without letting another player reuse its request", async () => {
+  const first = new TestMedia(document), second = new TestMedia(document);
+  const request = beginMediaPlayback(); const release = preservePlaybackOnPause(request);
+  await playMedia(element(first), request); first.pause(); await Promise.resolve();
+  assert.equal(isCurrentMediaPlayback(request), true);
+  await first.play(); assert.equal(isCurrentMediaPlayback(request), true);
+  await second.play(); assert.equal(isCurrentMediaPlayback(request), false);
+  release();
 });

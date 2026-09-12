@@ -16,7 +16,7 @@ export function ShotInstructionEditor({ index, note, description, busy, onSave, 
     return ok;
   };
   return <div className="flex h-full min-w-0 flex-col gap-1" onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}>
-    <textarea aria-label={`AI editing instructions for shot ${index + 1}`} title={description} value={value} maxLength={500} disabled={busy}
+    <textarea aria-label={`Clip instructions for shot ${index + 1}`} title={description} value={value} maxLength={2000} disabled={busy}
       placeholder="Tell the AI editor what to change, e.g. loop this clip"
       className="min-h-10 w-full flex-1 resize-none rounded border border-border bg-background/40 p-1.5 text-[11px] outline-none focus:border-primary disabled:opacity-50"
       onChange={e => { dirty.current = true; setDraft(e.target.value); onDraftChange?.(index, e.target.value); setStatus("Unsaved"); }} onBlur={() => void save()} />

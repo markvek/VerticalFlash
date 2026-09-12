@@ -1,3 +1,4 @@
+import { clipDescription, clipTranscript } from "./library-schema";
 import { promises as fs } from "fs";
 import { join, sep } from "path";
 import { randomUUID } from "crypto";
@@ -66,10 +67,10 @@ export async function listStoryboardFootage(videoId: string): Promise<FootageCan
     const path = await findLibraryFile(clip.filename);
     const duration = clip.duration && clip.duration > 0 ? clip.duration : path ? await probeDuration(path) : null;
     const timed = saved.get(clip.filename)?.segments ?? [];
-    const transcript = timed.length ? timed.map((segment) => segment.text).join(" ") : clip.analysis?.spoken_text ?? "";
+    const transcript = timed.length ? timed.map((segment) => segment.text).join(" ") : clipTranscript(clip);
     const segments: Segment[] = timed.length ? timed : clip.analysis && duration ? [{
       index: 0, start_time: 0, end_time: duration, start_word: null, end_word: null,
-      text: transcript, topic: clip.analysis.description || clip.filename, role: "demo", hook_score: 0,
+      text: transcript, topic: clipDescription(clip) || clip.filename, role: "demo", hook_score: 0,
       standalone: true, on_screen_text_idea: "",
     }] : [];
     return { clip, duration, segments, transcript, timing: timed.length ? "saved_segments" : segments.length ? "whole_clip" : "unavailable", included: included.has(clip.filename) };

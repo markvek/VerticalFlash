@@ -80,6 +80,8 @@ export function GenerationPanel({
 }: GenerationPanelProps) {
   const entry = generation?.shots[String(shotIndex)] ?? null;
   const [draft, setDraft] = useState(entry?.prompt ?? "");
+  const dirty = useRef(false);
+  const draftRef = useRef(draft); draftRef.current = draft;
   const [useReferences, setUseReferences] = useState(true);
   const [drafting, setDrafting] = useState(false);
   const [busy, setBusy] = useState<"generate" | "extend" | "accept" | null>(
@@ -93,11 +95,13 @@ export function GenerationPanel({
   const lastPromptKey = useRef(promptKey);
   useEffect(() => {
     if (lastPromptKey.current !== promptKey) {
+      const changedShot = lastPromptKey.current.split(":")[0] !== String(shotIndex);
       lastPromptKey.current = promptKey;
-      setDraft(entry?.prompt ?? "");
+      if (changedShot) dirty.current = false;
+      if (!dirty.current) setDraft(entry?.prompt ?? "");
       setError(null);
     }
-  }, [promptKey, entry?.prompt]);
+  }, [promptKey, entry?.prompt, shotIndex]);
 
   // First open with no prompts on disk: draft them all in one batch call
   useEffect(() => {
@@ -122,7 +126,7 @@ export function GenerationPanel({
 
   const savePrompt = async () => {
     const trimmed = draft.trim();
-    if (trimmed === (entry?.prompt ?? "")) return;
+    if (trimmed === (entry?.prompt ?? "")) return true;
     try {
       const res = await fetch(`/api/analyze/${videoId}/generation`, {
         method: "PATCH",
@@ -131,9 +135,12 @@ export function GenerationPanel({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Save failed");
+      if (draftRef.current.trim() === trimmed) dirty.current = false;
       onGeneration(data);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
+      return false;
     }
   };
 
@@ -163,12 +170,13 @@ export function GenerationPanel({
     setBusy(kind);
     setError(null);
     try {
+      if (!(await savePrompt())) throw new Error("Save the prompt successfully before generating.");
       const res = await fetch(
         `/api/analyze/${videoId}/generation/${kind}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ ...body, prompt: draft.trim() }),
         }
       );
       const data = await res.json();
@@ -253,7 +261,7 @@ export function GenerationPanel({
 
       <textarea
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => { dirty.current = true; setDraft(e.target.value); }}
         onBlur={savePrompt}
         disabled={drafting || generating}
         rows={4}

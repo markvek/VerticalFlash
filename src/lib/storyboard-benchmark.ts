@@ -478,6 +478,7 @@ async function executeVariant(
 export async function runStoryboardBenchmark(
   id: string,
   generatorFor: (choice: ModelChoice) => StructuredGenerator = modelGenerator,
+  judge: typeof judgeStoryboardBenchmark = judgeStoryboardBenchmark,
 ) {
   if (running.has(id)) return;
   running.add(id);
@@ -512,7 +513,7 @@ export async function runStoryboardBenchmark(
     // let a judge failure fail the run.
     try {
       const finished = await readBenchmarkRun(id);
-      const review = finished ? await judgeStoryboardBenchmark(finished) : null;
+      const review = finished ? await judge(finished) : null;
       if (review) await setBenchmarkAiReview(id, review);
     } catch (judgeError) {
       console.error("AI judge failed", judgeError);

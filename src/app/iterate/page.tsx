@@ -26,7 +26,7 @@ type Stage =
   | "error";
 
 const STAGE_LABELS: Record<Exclude<Stage, "done" | "error">, string> = {
-  downloading: "Re-downloading the post…",
+  downloading: "Importing the published video…",
   analyzing: "Analyzing shots with Gemini…",
   tagging: "Tagging shots…",
   suggesting: "Reading the stats for improvements…",
@@ -252,7 +252,7 @@ export default function IteratePage() {
 
       setStage(v.id, { stage: "done", filename });
       router.push(
-        `/downloads/${encodeURIComponent(filename)}?tab=variations`
+        `/downloads/${encodeURIComponent(filename)}?view=variations`
       );
     } catch (err) {
       setStage(v.id, {
@@ -460,7 +460,7 @@ export default function IteratePage() {
                           href={`/downloads/${encodeURIComponent(retransferred)}`}
                           className="text-xs text-muted-foreground hover:text-foreground"
                         >
-                          already retransferred · open project
+                          Already imported · open source
                         </Link>
                       )}
                       {p?.stage === "error" && (
@@ -470,7 +470,7 @@ export default function IteratePage() {
                       )}
                       {p?.stage === "done" && p.filename && (
                         <Link
-                          href={`/downloads/${encodeURIComponent(p.filename)}?tab=variations`}
+                          href={`/downloads/${encodeURIComponent(p.filename)}?view=variations`}
                           className="text-xs text-primary hover:underline"
                         >
                           Ready — open in editor

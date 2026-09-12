@@ -1,5 +1,6 @@
 "use client";
 
+import { useBrand } from "@/app/context/brand";
 import { NativeModelSelector } from "@/components/form/NativeModelSelector";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
@@ -18,6 +19,7 @@ const PROMPT_FLOW_DEFAULT_SECONDS = 30;
 // with the prompt and offers the song as an optional field.
 function CreateForm() {
   const router = useRouter();
+  const brand = useBrand();
   const searchParams = useSearchParams();
   const musicFirst = searchParams.get("flow") === "music";
 
@@ -82,16 +84,17 @@ function CreateForm() {
           ? "Planning shots to the track with Gemini… (can take a minute)"
           : "Planning shots with Gemini… (can take a minute)"
       );
+      let planningError: string | null = null;
       try {
         const planRes = await fetch(`/api/analyze/${videoId}`, { method: "POST" });
         if (!planRes.ok) {
           const planData = await planRes.json().catch(() => null);
-          console.error("shot plan failed:", planData?.error);
+          planningError = planData?.error || "Planning was unavailable";
         }
       } catch (planError) {
-        console.error("shot plan failed:", planError);
+        planningError = planError instanceof Error ? planError.message : "Planning was interrupted";
       }
-      router.push(`/downloads/${encodeURIComponent(filename)}`);
+      router.push(`/editing/${encodeURIComponent(filename)}${planningError ? `?planning_error=${encodeURIComponent(planningError.slice(0, 300))}` : ""}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create the project");
       setStatus(null);
@@ -139,8 +142,8 @@ function CreateForm() {
         maxLength={2000}
         placeholder={
           musicFirst
-            ? "What should happen over this track? e.g. “POV: the duck rides shotgun on a night drive, reveal at the drop”. Leave empty and Gemini picks a format."
-            : "Describe the video you want, e.g. “a 30-second montage of the duck on different dashboards, ending on the Tesla screen frame”"
+            ? `What should happen over this track? For example: reveal ${brand.productShortName} at the beat drop. Leave empty for a suggested concept.`
+            : `Describe the video you want. For example: a 30-second demonstration of ${brand.productShortName}, ending with its most useful feature.`
         }
         className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-y"
       />
@@ -170,7 +173,7 @@ function CreateForm() {
           ? track.duration != null && duration > track.duration
             ? "Longer than the song — it loops to fill the video."
             : "Defaults to the song length, capped at 60s."
-          : "TikTok favors short — 15 to 60 seconds."}
+          : "Choose the length that fits your story."}
       </p>
     </div>
   );

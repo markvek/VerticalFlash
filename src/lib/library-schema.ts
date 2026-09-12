@@ -83,11 +83,31 @@ export const LibraryClipZ = z.object({
   source: z.string().optional().nullable(),
   duration: z.number().optional().nullable(),
   analysis: ClipAnalysisZ.optional().nullable(),
+  corrections: z.object({
+    description: z.string().optional(),
+    spoken_text: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    updatedAt: z.string().datetime(),
+  }).optional(),
+  rejectedTags: z.array(z.string()).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
 
 export type LibraryClip = z.infer<typeof LibraryClipZ>;
+
+// Human edits are authoritative; keep the original model observations for review.
+export function clipDescription(clip: LibraryClip): string {
+  return clip.corrections?.description ?? clip.description ?? clip.analysis?.description ?? "";
+}
+export function clipTranscript(clip: LibraryClip): string {
+  return clip.corrections?.spoken_text ?? clip.analysis?.spoken_text ?? "";
+}
+export function clipTags(clip: LibraryClip): string[] {
+  const rejected = new Set((clip.rejectedTags ?? []).map(t => t.trim().toLowerCase()));
+  return [...new Set((clip.corrections?.tags ?? [...(clip.tags ?? []), ...(clip.analysis?.suggested_tags ?? [])])
+    .map(t => t.trim().toLowerCase()).filter(t => t && !rejected.has(t)))];
+}
 
 export const ClipLibraryZ = z.object({
   videos: z.array(LibraryClipZ),

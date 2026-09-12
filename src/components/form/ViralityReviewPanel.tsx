@@ -93,7 +93,7 @@ export function ViralityReviewPanel({ videoId, storyboardId, onSeek }: { videoId
           {!assessment.text.length && !assessment.broll.length && <p className="text-xs text-muted-foreground">No text or B-roll additions recommended.</p>}
           {assessment.text.map((entry, i) => <p key={`text-${i}`} className="text-xs"><strong>Text · Beat {entry.beat_index + 1} · +{entry.offset.toFixed(1)}s:</strong> “{entry.text}” <span className="text-muted-foreground">— {entry.reason}</span></p>)}
           {assessment.broll.map((entry, i) => <p key={`broll-${i}`} className="text-xs"><strong>B-roll · Beat {entry.beat_index + 1} · +{entry.offset.toFixed(1)}s:</strong> {entry.description} <span className="text-muted-foreground">— {entry.reason}</span></p>)}
-          <p className="text-xs text-muted-foreground">Choose which additions to include beside Start Edit. Text stays editable; B-roll is placed only when a strong library match is available.</p>
+          <p className="text-xs text-muted-foreground">Choose which additions to include when you create an editing project. Text stays editable; B-roll is placed only when a strong library match is available.</p>
         </div>
       </>}
     </>}

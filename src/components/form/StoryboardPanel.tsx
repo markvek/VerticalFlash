@@ -1,5 +1,7 @@
 "use client";
 
+import { BeatTrimDialog } from "./BeatTrimDialog";
+import type { RefObject } from "react";
 import { NativeModelSelector } from "@/components/form/NativeModelSelector";
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +11,7 @@ import { Dialog } from "radix-ui";
 import { ChevronDown, ChevronRight, Loader2, Play, Plus, Square, X } from "lucide-react";
 import { StoryboardBeatCard } from "./StoryboardBeatCard";
 import { useStoryboardReviews } from "./ViralityReviewPanel";
-import { beginMediaPlayback, isCurrentMediaPlayback, subscribeMediaPlayback } from "@/lib/media-playback";
+import { beginMediaPlayback, isCurrentMediaPlayback, subscribeMediaPlayback, preservePlaybackOnPause } from "@/lib/media-playback";
 import type {
   Beat,
   FootageSource,
@@ -41,6 +43,7 @@ export interface StoryboardPanelProps {
   onSeek?: (seconds: number, source?: FootageSource, request?: number) => void;
   onStopPreview?: () => void;
   previewMedia?: ReactNode;
+  previewVideoRef?: RefObject<HTMLVideoElement | null>;
   footagePanel?: ReactNode;
   refreshKey?: number;
   onOpenReview?: (storyboardId: string) => void;
@@ -114,9 +117,9 @@ function beatMatchesSegment(beat: Beat, segment: Segment): boolean {
   );
 }
 
-export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
+export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onStopPreview, previewMedia, previewVideoRef, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
   const [model, setModel] = useState("");
-  const [segments, setSegments] = useState<MasterSegments | null>(null);
+  const [segments, setSegments] = useState<(MasterSegments & { sourceDurations?: Record<string, number> }) | null>(null);
   const [storyboards, setStoryboards] = useState<MasterStoryboards | null>(null);
   const [activeStoryboardId, setActiveStoryboardId] = useState<string | null>(
     null
@@ -138,6 +141,8 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
   const [allowBroll, setAllowBroll] = useState(false);
   const [brief, setBrief] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [trimIndex, setTrimIndex] = useState<number | null>(null);
+  const [history, setHistory] = useState<Record<string, { past: Storyboard[]; future: Storyboard[] }>>({});
   const [saving, setSaving] = useState(false);
   const [addText, setAddText] = useState(false);
   const [addBroll, setAddBroll] = useState(false);
@@ -149,7 +154,8 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
     Record<string, { filename: string; displayName: string }>
   >({});
   const [previewing, setPreviewing] = useState<string | null>(null);
-  const previewTimers = useRef<number[]>([]);
+  const releasePreviewPause = useRef<(() => void) | null>(null);
+  const previewFrame = useRef<number | null>(null);
   const previewRequest = useRef<number | null>(null);
   const draggedBeat = useRef<{ storyboardId: string; index: number } | null>(
     null
@@ -233,8 +239,9 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
   }, [activeStoryboardId, storyboards]);
 
   const clearPreview = useCallback(() => {
-    for (const t of previewTimers.current) window.clearTimeout(t);
-    previewTimers.current = [];
+    releasePreviewPause.current?.(); releasePreviewPause.current = null;
+    if (previewFrame.current != null) cancelAnimationFrame(previewFrame.current);
+    previewFrame.current = null;
     previewRequest.current = null;
     setPreviewing(null);
   }, []);
@@ -270,6 +277,7 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           storyboard_id: storyboard.id,
+          revision: storyboard.revision ?? 1,
           beats: storyboard.beats,
         }),
       });
@@ -282,7 +290,8 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
     }
   };
 
-  const commitStoryboard = async (next: Storyboard) => {
+  const commitStoryboard = async (next: Storyboard, travel?: "past" | "future") => {
+    stopPreview();
     const previousStoryboards = storyboards;
     const previousAccepted = acceptedNow;
     setStoryboards((current) =>
@@ -307,6 +316,12 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
     });
     try {
       await saveStoryboard(next);
+      const previous = previousStoryboards?.storyboards.find(s => s.id === next.id);
+      if (previous) setHistory(current => {
+        const h = current[next.id] ?? { past: [], future: [] };
+        return { ...current, [next.id]: travel === "past" ? { past: h.past.slice(0, -1), future: [...h.future, previous] } : travel === "future" ? { past: [...h.past, previous], future: h.future.slice(0, -1) } : { past: [...h.past.slice(-49), previous], future: [] } };
+      });
+      setTrimIndex(null);
     } catch (e) {
       setStoryboards(previousStoryboards);
       setAcceptedNow(previousAccepted);
@@ -371,27 +386,29 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
 
   const preview = (sb: Storyboard) => {
     stopPreview();
-    if (!onSeek) return;
+    if (!onSeek || !previewVideoRef) return;
     const request = beginMediaPlayback();
     previewRequest.current = request;
+    releasePreviewPause.current = preservePlaybackOnPause(request);
     setPreviewing(sb.id);
-    let offset = 0;
-    sb.beats.forEach((beat, i) => {
-      const at = offset;
-      const t = window.setTimeout(() => {
-        if (!isCurrentMediaPlayback(request)) return;
-        onSeek(beat.start, beat.source, request);
-        if (i === sb.beats.length - 1) {
-          const done = window.setTimeout(
-            stopPreview,
-            Math.max(0, (beat.end - beat.start) * 1000)
-          );
-          previewTimers.current.push(done);
+    let index = 0, armed = false;
+    const startBeat = () => { armed = false; const b = sb.beats[index]; onSeek(b.start, b.source, request); };
+    const tick = () => {
+      if (previewRequest.current !== request || !isCurrentMediaPlayback(request)) return;
+      const media = previewVideoRef.current, beat = sb.beats[index];
+      if (media?.error) { stopPreview(); setError("Preview footage could not be loaded."); return; }
+      const expected = beat.source ? `/api/library/clips/${encodeURIComponent(beat.source.filename)}` : `/api/downloads/${encodeURIComponent(filename)}`;
+      const start = beat.start - (beat.source?.offset ?? 0), end = beat.end - (beat.source?.offset ?? 0);
+      if (media && media.currentSrc === new URL(expected, location.href).href && media.readyState >= 2 && !media.seeking) {
+        if (media.currentTime >= start - 0.08 && media.currentTime < end) armed = true;
+        if (armed && ((!media.paused && media.currentTime >= end - 0.035) || media.ended)) {
+          if (index + 1 === sb.beats.length) { stopPreview(); return; }
+          index++; startBeat();
         }
-      }, at);
-      previewTimers.current.push(t);
-      offset += Math.max(0, beat.end - beat.start) * 1000;
-    });
+      }
+      previewFrame.current = requestAnimationFrame(tick);
+    };
+    startBeat(); previewFrame.current = requestAnimationFrame(tick);
   };
 
   const requestBody = (): StoryboardRequest | string => {
@@ -500,6 +517,11 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
 
   return (
     <div className={previewMedia ? "grid min-w-0 grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(220px,320px)_minmax(0,1fr)]" : "flex min-w-0 flex-col gap-4"}>
+      {trimIndex != null && activeStoryboard?.beats[trimIndex] && <BeatTrimDialog open beat={activeStoryboard.beats[trimIndex]} index={trimIndex}
+        words={segments.words} sentences={segments.sentences} busy={saving} error={error}
+        sourceDuration={segments.sourceDurations?.[activeStoryboard.beats[trimIndex].source?.filename ?? "master"] ?? activeStoryboard.beats[trimIndex].end - (activeStoryboard.beats[trimIndex].source?.offset ?? 0)}
+        onClose={() => { if (!saving) setTrimIndex(null); }} onSeek={seconds => onSeek?.(seconds, activeStoryboard.beats[trimIndex].source)}
+        onApply={trim => void commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.map((beat, index) => index === trimIndex ? { ...beat, ...trim } : beat)))} />}
       {previewMedia}
       {footagePanel}
       <section aria-label="Storyboard ideas" className={`min-w-0 space-y-3 rounded-lg border border-border p-3 ${previewMedia && footagePanel ? "lg:col-span-2" : ""}`}>
@@ -515,7 +537,7 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
             {storyboards?.storyboards.length ? "Create More Ideas" : "Create Ideas"}
           </button>
         </div>
-      <NativeModelSelector value={model} onChange={setModel} disabled={generating} />
+      <NativeModelSelector videoId={videoId} value={model} onChange={setModel} disabled={generating} />
 
       {(!storyboards || controlsOpen) && (
         <div className="flex flex-col gap-3">
@@ -723,7 +745,12 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
                   event.dataTransfer.setDragImage(card, Math.max(0, event.clientX - rect.left), Math.max(0, event.clientY - rect.top));
                 }} onDragEnd={clearDrag}>
                 <StoryboardBeatCard beat={beat} segment={segment} index={index} disabled={saving || accepting !== null}
-                  onSeek={() => onSeek?.(beat.start, beat.source)}
+                  onSeek={() => { stopPreview(); onSeek?.(beat.start, beat.source); }}
+                  onTrim={() => { stopPreview(); setTrimIndex(index); }}
+                  canRemove={activeStoryboard.beats.length > 1}
+                  onRemove={() => void commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.filter((_, i) => i !== index)))}
+                  canMoveUp={index > 0} canMoveDown={index < activeStoryboard.beats.length - 1}
+                  onMove={direction => reorderBeat(activeStoryboard, index, index + direction)}
                   onNote={(note) => commitStoryboard(withBeats(activeStoryboard, activeStoryboard.beats.map((value, i) => i === index ? { ...value, fix_note: note } : value)))}
                   />
                 </div>
@@ -737,23 +764,25 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
           </div>
           <div className="space-y-2 rounded-md border border-border p-3">
             <div className="flex flex-wrap items-center gap-3 text-xs">
-              <span>{reviews.loading ? "Loading hook review…" : activeReview ? `Hook ${activeReview.assessments.hook.score}/5 · Review ready` : "Review needed for this revision"}</span>
+              <span>{reviews.loading ? "Loading hook review…" : activeReview ? `AI review hook ${activeReview.assessments.hook.score}/5 · Review ready` : "Review needed for this revision"}</span>
               {onOpenReview ? <button className="underline" onClick={() => onOpenReview(activeStoryboard.id)}>Virality Review</button> : <a className="underline" href={`/editing/${encodeURIComponent(filename)}?view=virality&storyboard=${encodeURIComponent(activeStoryboard.id)}`}>Virality Review</a>}
               {!activeReview && !reviews.loading && <button className="underline disabled:opacity-50" disabled={!!reviews.reviewing || saving || !!accepting} onClick={() => reviews.review(activeStoryboard.id)}>{reviews.reviewing ? "Reviewing…" : "Review storyboard"}</button>}
             </div>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={addText && !!activeReview?.text.length} disabled={!activeReview?.text.length || saving || !!accepting} onChange={e => setAddText(e.target.checked)} />Add recommended on-screen text{activeReview ? ` (${activeReview.text.length})` : ""}</label>
             <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={addBroll && !!activeReview?.broll.length} disabled={!activeReview?.broll.length || saving || !!accepting} onChange={e => setAddBroll(e.target.checked)} />Add recommended B-roll{activeReview ? ` (${activeReview.broll.length})` : ""}</label>
-            <p className="text-[11px] text-muted-foreground">Optional additions based on this storyboard review. Text is separate from speech captions. Strong B-roll matches are placed over your original audio; unmatched windows stay as suggestions.</p>
+            <p className="text-[11px] text-muted-foreground">AI scores assess the script, not measured audience performance. Transcript hooks use /10; the separate review uses /5. Optional additions based on this review. Text is separate from speech captions. Strong B-roll matches are placed over your original audio; unmatched windows stay as suggestions.</p>
             {reviews.error && <p role="alert" className="text-xs text-red-400">{reviews.error}</p>}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button onClick={() => previewing ? stopPreview() : preview(activeStoryboard)} disabled={!onSeek}
+            {(["past", "future"] as const).map(direction => <button key={direction} disabled={saving || !!accepting || !history[activeStoryboard.id]?.[direction].length}
+              className="rounded border px-3 py-2 text-xs disabled:opacity-40" onClick={() => { const target = history[activeStoryboard.id][direction].at(-1)!; void commitStoryboard({ ...target, revision: activeStoryboard.revision }, direction); }}>{direction === "past" ? "Undo" : "Redo"}</button>)}
+            <button onClick={() => previewing ? stopPreview() : preview(activeStoryboard)} disabled={!onSeek || !previewVideoRef}
               className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs font-semibold disabled:opacity-50">
               {previewing ? <Square className="size-3" /> : <Play className="size-3" />}{previewing ? "Stop preview" : "Preview"}
             </button>
             <button disabled={accepting !== null || saving} onClick={() => accept(activeStoryboard)}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">
-              {accepting && <Loader2 className="size-3 animate-spin" />}{accepting ? "Creating edit..." : selectedAccepted ? "Create another edit" : "Start Edit"}
+              {accepting && <Loader2 className="size-3 animate-spin" />}{accepting ? "Creating edit..." : selectedAccepted ? "Create another edit" : "Create editing project"}
             </button>
             {selectedAccepted && <a href={`/editing/${encodeURIComponent(selectedAccepted)}`} className="text-xs underline">Open editing project</a>}
           </div>

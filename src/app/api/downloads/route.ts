@@ -386,6 +386,7 @@ export async function DELETE(request: NextRequest) {
         fs
           .rm(join(GENERATED_DIR, videoId), { recursive: true, force: true })
           .catch(() => {}),
+        fs.rm(join(RENDERS_DIR, videoId), { recursive: true, force: true }).catch(() => {}),
         fs.unlink(join(RENDERS_DIR, `${videoId}.mp4`)).catch(() => {}),
         fs.unlink(join(RENDERS_DIR, `${videoId}.render.json`)).catch(() => {}),
         fs

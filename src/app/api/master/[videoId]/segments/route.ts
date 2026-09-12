@@ -1,3 +1,6 @@
+import { findDownloadFile } from "@/lib/download-files";
+import { probeDuration } from "@/lib/master-assemble";
+import { readAttachedFootage } from "@/lib/storyboard-footage";
 import { NextRequest, NextResponse } from "next/server";
 import { isValidVideoId } from "@/lib/video-id";
 import { readStoryboardSegments } from "@/lib/storyboard-footage";
@@ -18,5 +21,10 @@ export async function GET(
       { status: 404 }
     );
   }
-  return NextResponse.json(segments);
+  const file = await findDownloadFile(videoId);
+  const sourceDurations: Record<string, number> = {};
+  const duration = file ? await probeDuration(file.path) : null;
+  if (duration != null) sourceDurations.master = duration;
+  for (const item of await readAttachedFootage(videoId)) sourceDurations[item.clip.filename] = item.duration;
+  return NextResponse.json({ ...segments, sourceDurations });
 }

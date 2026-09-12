@@ -474,6 +474,7 @@ export interface DiscoveryData {
 }
 
 export interface ScanResult {
+  errors?: string[];
   hashtags: HashtagData[];
   keywords: KeywordData[];
   competitors: CompetitorData[];

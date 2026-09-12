@@ -1,9 +1,12 @@
+import { trackedRoute } from "@/lib/tracked-route";
+import { projectModel } from "@/lib/models/native";
+import { clipDescription, clipTags } from "@/lib/library-schema";
 import { NextRequest, NextResponse } from "next/server";
 import { getBrandConfig } from "@/lib/config";
 import { loadLibrary } from "@/lib/library-store";
 import { promises as fs } from "fs";
 import { join, basename } from "path";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel, GEMINI_MODEL } from "@/lib/gemini";
 import { AnalysisZ, type Analysis } from "@/lib/analysis-schema";
 import {
   EDIT_INTENTS,
@@ -15,7 +18,6 @@ import {
   type ShotRecommendations,
 } from "@/lib/recommendation-schema";
 import { generateTrimWindows, type TrimTarget } from "@/lib/trim-windows";
-import type { ClipLibrary } from "@/lib/library-schema";
 import {
   ShotGenerationsZ,
   generatedClipDir,
@@ -83,12 +85,8 @@ async function loadCatalog(): Promise<CatalogClip[]> {
         location: v.analysis!.location,
         time_of_day: v.analysis!.time_of_day,
         product_present: v.analysis!.product_present,
-        description: v.analysis!.description,
-        tags: Array.from(
-          new Set(
-            [...(v.tags || []), ...v.analysis!.suggested_tags].map(normalizeTag)
-          )
-        ),
+        description: clipDescription(v),
+        tags: clipTags(v),
       }));
   } catch {
     return [];
@@ -507,7 +505,7 @@ export async function PATCH(
   }
 }
 
-export async function POST(
+async function handlePost(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -537,7 +535,7 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Gemini not configured" },
@@ -702,7 +700,7 @@ export async function POST(
     const stored: ShotRecommendations = {
       videoId,
       generatedAt: new Date().toISOString(),
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       clipsConsidered: catalog.length,
       shots,
       usage: {
@@ -726,3 +724,5 @@ export async function POST(
     );
   }
 }
+
+export const POST = trackedRoute("Match footage", handlePost);

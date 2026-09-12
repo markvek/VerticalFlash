@@ -159,6 +159,7 @@ export const AnalysisZ = z.object({
   full_transcript: z.string(),
   shots: z.array(
     z.object({
+      id: z.string().optional(),
       index: z.number(),
       start_time: z.number(),
       end_time: z.number(),
@@ -201,7 +202,12 @@ export const AnalysisZ = z.object({
       totalTokens: z.number().optional(),
     })
     .optional(),
-});
+}).transform(withShotIds);
+
+// Legacy IDs are deterministic and remain stable when a shot moves or trims.
+export function withShotIds<T extends { videoId: string; analyzedAt: string; shots: Array<{ id?: string; index: number }> }>(analysis: T): T {
+  return { ...analysis, shots: analysis.shots.map(shot => ({ ...shot, id: shot.id ?? `${analysis.videoId}:${analysis.analyzedAt}:${shot.index}` })) };
+}
 
 export type Analysis = z.infer<typeof AnalysisZ>;
 
