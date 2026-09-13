@@ -1,3 +1,4 @@
+import { referenceExportIssues } from "@/lib/reference-selection";
 import { captureRenderInputs, revisionFromSnapshot, renderIsStale, exportOperations } from "@/lib/render-revision";
 import { RenderManifestZ } from "@/lib/render-schema";
 import { textOverlaysPath } from "@/lib/text-overlays-store";
@@ -138,6 +139,9 @@ export async function POST(
         { status: 404 }
       );
     }
+
+    const replacementIssues = await referenceExportIssues(analysis, recs);
+    if (replacementIssues.length) return NextResponse.json({ error: replacementIssues.join("; ") }, { status: 409 });
 
     const videoPath = await findVideoFile(videoId);
     if (!videoPath) {

@@ -1,3 +1,5 @@
+import { withProjectEdit } from "@/lib/project-edit-lock";
+import { prepareReferenceSelection, saveReferenceRecommendations } from "@/lib/reference-selection";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
@@ -33,10 +35,11 @@ async function loadAnalysis(videoId: string): Promise<Analysis | null> {
 // source:"generated" recommendation and the shot's selection, so the
 // timeline, render breakdown, and planner all pick it up through the
 // existing selection machinery.
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ videoId: string }> }
-) {
+export async function POST(request: NextRequest, context: { params: Promise<{ videoId: string }> }) {
+  const { videoId } = await context.params;
+  return withProjectEdit(videoId, () => acceptLocked(request, context));
+}
+async function acceptLocked(request: NextRequest, { params }: { params: Promise<{ videoId: string }> }) {
   const { videoId } = await params;
   if (!/^[\w-]+$/.test(videoId)) {
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
@@ -145,16 +148,15 @@ export async function POST(
   );
   recShot.recommendations.push(generatedRec);
   recShot.selected_filename = attempt.file;
+  recShot.keep_source = false;
+  if (recs.mode === "reference") {
+    try { await prepareReferenceSelection(recs, shotIndex, attempt.file); }
+    catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : "Cannot use clip" }, { status: 400 }); }
+  }
 
   genShot.accepted_file = attempt.file;
 
-  const path = recommendationsPath(videoId);
-  const tmp = `${path}.tmp`;
-  await fs.writeFile(
-    tmp,
-    JSON.stringify(ShotRecommendationsZ.parse(recs), null, 2)
-  );
-  await fs.rename(tmp, path);
+  await saveReferenceRecommendations(recs);
   await saveGenerations(generations);
 
   return NextResponse.json({ generation: generations, recommendations: recs });

@@ -165,6 +165,17 @@ export function planShots(
   timeMode: "uniform" | "follow_original" | "none";
   timeTarget: TimeGroup | null;
 } {
+  if (recs.mode === "reference") {
+    recs = { ...recs, shots: recs.shots.map(s => {
+      const duration = analysis.shots.find(shot => shot.index === s.shot_index);
+      const selected = s.recommendations.find(r => r.filename === s.selected_filename);
+      const available = selected ? clipDurations.get(selected.filename) : null;
+      const usable = selected && available != null && selected.trim_start != null && duration &&
+        available - selected.trim_start >= duration.end_time - duration.start_time - 0.001;
+      if (!s.keep_source && !usable) warnings.push(`Shot ${s.shot_index + 1}: replacement unavailable — showing reference; choose a replacement before export`);
+      return { ...s, keep_source: s.keep_source || !usable, recommendations: selected ? [selected] : [] };
+    }) };
+  }
   const recsByShot = new Map(recs.shots.map((s) => [s.shot_index, s]));
   const usesSource = (shotIndex: number): boolean =>
     recsByShot.get(shotIndex)?.keep_source === true &&
@@ -213,7 +224,7 @@ export function planShots(
       moment_note: null,
     };
     const claim = claimedBy.get(selected);
-    if (claim) {
+    if (claim && recs.mode !== "reference") {
       warnings.push(
         `Shot ${shot.index + 1}: selected clip ${selected} already used by shot ${claim.shot} — using a fallback`
       );

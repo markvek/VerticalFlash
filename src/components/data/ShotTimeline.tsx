@@ -33,6 +33,7 @@ export interface TimelineShot {
   // description when there is none)
   title?: string;
   sourceName?: string;
+  replacementStatus?: string;
 }
 
 export interface TimelineRec {
@@ -89,7 +90,7 @@ export interface TimelineBroll {
 }
 
 export interface ShotTimelineProps {
-  footage?: { busy: boolean; onDrop: (range: FootageRange, action: "insert" | "replace" | "broll", index: number, offset?: number) => void };
+  footage?: { allowInsert?: boolean; busy: boolean; onDrop: (range: FootageRange, action: "insert" | "replace" | "broll", index: number, offset?: number) => void };
   text?: { enabled: boolean; entry: (index: number) => ShotOverlay; label: (index: number) => string; onSelect: (index: number) => void; onMatchSpeech: (index: number, enabled: boolean) => void; busy: boolean };
   instructions?: { notes: Record<string, string>; drafts?: Record<string, string>; onDraftChange?: (index: number, text: string) => void; busy: boolean; onSave: (index: number, text: string) => Promise<boolean>; onApply?: () => void };
   shots: TimelineShot[];
@@ -447,7 +448,7 @@ export function ShotTimeline({
       {/* Scrollable tracks */}
       <div ref={timelineRef} className={`relative overflow-x-auto ${drag || blockDrag ? "select-none" : ""}`}>
         <div className="relative" style={{ width: totalWidth }}>
-          {footage && Array.from({ length: shots.length + 1 }, (_, index) => <div key={`insert-${index}`} aria-label={`Insert footage ${index === shots.length ? "at end" : `before shot ${index + 1}`}`} {...dropHandlers("insert", index)}
+          {footage && footage.allowInsert !== false && Array.from({ length: shots.length + 1 }, (_, index) => <div key={`insert-${index}`} aria-label={`Insert footage ${index === shots.length ? "at end" : `before shot ${index + 1}`}`} {...dropHandlers("insert", index)}
             className={`absolute z-20 flex w-5 items-center justify-center rounded border border-dashed text-xs ${footageTarget === `insert:${index}` ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background/80 text-muted-foreground"}`}
             style={{ top: VIDEO_TOP, height: 64, left: index === shots.length ? totalWidth - 20 : leftOf(index) }} title={index === shots.length ? "Insert at end" : `Insert before shot ${index + 1}`}>+</div>)}
           {footage && shots.map(s => <div key={`replace-${s.index}`} {...dropHandlers("replace", s.index)} aria-label={`Replace shot ${s.index + 1} with footage`}
@@ -528,6 +529,7 @@ export function ShotTimeline({
                               <span className="text-[10px] font-mono text-muted-foreground">
                                 {fmt(s.start_time)}–{fmt(s.start_time + durationFor(s.index))}
                               </span>
+                              {s.replacementStatus && <span className={`rounded px-1 text-[9px] ${s.replacementStatus === "Needs replacement" ? "bg-amber-500/15 text-amber-500" : s.replacementStatus === "Selected" ? "bg-green-500/15 text-green-500" : "bg-primary/15 text-primary"}`}>{s.replacementStatus}</span>}
                               {section && (
                                 <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.25px] ${style.badge}`}>
                                   {section.label}

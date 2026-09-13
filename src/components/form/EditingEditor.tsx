@@ -1,4 +1,9 @@
 "use client";
+import { useReferenceImport } from "./useReferenceImport";
+import { REFERENCE_STAGES } from "@/lib/reference-import-schema";
+import { ReferenceReplacements } from "./ReferenceReplacements";
+import { ReferenceFootagePanel } from "./ReferenceFootagePanel";
+import type { ShotRecommendations as StoredRecommendations } from "@/lib/recommendation-schema";
 import { EditorDivider } from "./EditorDivider";
 import { flushEditSaves } from "@/lib/edit-save-tracker";
 
@@ -113,6 +118,7 @@ interface ClipPreview {
 }
 
 interface ShotRecommendations {
+  mode?: "reference";
   videoId: string;
   generatedAt: string;
   model: string;
@@ -121,6 +127,8 @@ interface ShotRecommendations {
     shot_index: number;
     recommendations: Recommendation[];
     selected_filename?: string | null;
+    choice_origin?: "automatic" | "user" | "generated";
+    needs_replacement?: boolean;
     // true = render from the source video at the shot's own time (no
     // library clip); set by storyboard cutdowns and the per-shot toggle
     keep_source?: boolean | null;
@@ -358,11 +366,17 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   const searchParams = useSearchParams();
   const filename = filenameOverride ?? decodeURIComponent(params.filename as string);
   const videoId = extractVideoId(filename);
+  const preparation = useReferenceImport(videoId);
+  const [referenceView, setReferenceView] = useState(false);
+  const [choiceBusy, setChoiceBusy] = useState(false);
+  const choiceSaving = useRef(false);
+  const [choiceError, setChoiceError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const upperRef = useRef<HTMLDivElement>(null);
   const [playbackError, setPlaybackError] = useState(false);
+  useEffect(() => { setPlaybackError(false); }, [preparation.job?.status]);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(searchParams.get("planningError") ? `Project created; planning failed: ${searchParams.get("planningError")}. Retry planning in this editor.` : null);
@@ -370,6 +384,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   const [selectedShot, setSelectedShot] = useState(0);
   const [playheadTime, setPlayheadTime] = useState(0);
   const [recs, setRecs] = useState<ShotRecommendations | null>(null);
+  const referenceMode = recs?.mode === "reference" || !!preparation.job;
   const [generation, setGeneration] = useState<ShotGenerationsData | null>(
     null
   );
@@ -395,7 +410,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   }, [workspace]);
   useEffect(() => {
     const view = searchParams.get("view") ?? searchParams.get("tab");
-    if (view && ["variations", "video", "shots", "clips", "storyboards", "render", "captions", "virality"].includes(view)) setPanelTabState(view as EditorView);
+    if (view && ["variations", "video", "shots", "upload", "clips", "storyboards", "render", "captions", "virality"].includes(view)) setPanelTabState(view as EditorView);
   }, [searchParams]);
   useEffect(() => {
     if (!videoId) return;
@@ -723,7 +738,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
     return () => {
       cancelled = true;
     };
-  }, [videoId]);
+  }, [videoId, preparation.revision]);
 
   // Keep the selected shot's column centered in the timeline (scroll only
   // the strip itself — scrollIntoView would also drag the page's scroll)
@@ -772,6 +787,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
 
   // In the clips tab, auto-open the selected shot's top recommendation
   useEffect(() => {
+    if (referenceMode) { setPreviewClip(null); return; }
     if (panelTab !== "clips") return;
     const first = recs?.shots.find((s) => s.shot_index === selectedShot)
       ?.recommendations[0];
@@ -784,7 +800,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
           }
         : null
     );
-  }, [panelTab, selectedShot, recs]);
+  }, [panelTab, selectedShot, recs, referenceMode]);
 
   const handleAnalyze = async () => {
     if (!videoId || analyzing) return;
@@ -828,7 +844,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   };
 
   const handleMatch = async () => {
-    if (!videoId || matching) return;
+    if (!videoId || matching || preparation.busy || choiceSaving.current) return;
     setMatching(true);
     setMatchError(null);
     try {
@@ -973,7 +989,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   }, [videoId, render?.exportId, rendering, recs, editNotes, textOverlays, analysis, brollTrack, framing.document]);
 
   const handleRender = async () => {
-    if (!videoId || rendering) return;
+    if (!videoId || rendering || preparation.busy || choiceBusy || matching) return;
     setRendering(true);
     setRenderError(null);
     setPanelTab("render");
@@ -1117,7 +1133,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   // Timeline drag: persist the new shot times (the server re-lays the
   // cutdown's timeline and refreshes the affected frames)
   const editClips = async (operation: TimelineOperation | { type: "undo" | "redo" }) => {
-    if (!videoId || !timelineData || timelineSaving.current) return false;
+    if (!videoId || !timelineData || timelineSaving.current || choiceSaving.current || preparation.busy || matching) return false;
     timelineSaving.current = true;
     setRetiming(true); setTimelineError(null);
     videoRef.current?.pause();
@@ -1231,28 +1247,31 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
 
   // Persist (or clear) the confirmed clip choice for the current shot
   const patchSelection = async (
-    filename: string | null
+    filename: string | null, index = selectedShot, trimStart?: number
   ): Promise<ShotRecommendations | null> => {
-    if (!videoId) return null;
+    if (!videoId || choiceSaving.current || preparation.busy || matching) return null;
+    choiceSaving.current = true; setChoiceBusy(true); setChoiceError(null);
+    videoRef.current?.pause();
     try {
       const res = await fetch(`/api/analyze/${videoId}/recommendations`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shot_index: selectedShot, filename }),
+        body: JSON.stringify({ shot_index: index, filename, trim_start: trimStart }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Selection failed");
       setRecs(data);
       return data;
     } catch (error) {
-      alert(error instanceof Error ? error.message : "Selection failed");
+      setChoiceError(error instanceof Error ? error.message : "Selection failed");
       return null;
-    }
+    } finally { choiceSaving.current = false; setChoiceBusy(false); }
   };
 
   // Flip the current shot between its original footage and a library clip
   const patchKeepSource = async (keepSource: boolean) => {
-    if (!videoId) return;
+    if (!videoId || choiceSaving.current || matching || preparation.busy) return;
+    choiceSaving.current = true; setChoiceBusy(true); setChoiceError(null);
     try {
       const res = await fetch(`/api/analyze/${videoId}/recommendations`, {
         method: "PATCH",
@@ -1266,10 +1285,30 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
       if (!res.ok) throw new Error(data.error || "Saving the toggle failed");
       setRecs(data);
     } catch (error) {
-      alert(
-        error instanceof Error ? error.message : "Saving the toggle failed"
-      );
-    }
+      setChoiceError(error instanceof Error ? error.message : "Saving the toggle failed");
+    } finally { choiceSaving.current = false; setChoiceBusy(false); }
+  };
+
+  const replacementHistory = async (action: "undo" | "redo") => {
+    if (choiceSaving.current || matching || preparation.busy) return;
+    choiceSaving.current = true; setChoiceBusy(true); setChoiceError(null);
+    try {
+      const res = await fetch(`/api/analyze/${videoId}/replacements/history`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error);
+      setRecs(data.recommendations);
+    } catch (e) { setChoiceError(e instanceof Error ? e.message : "Could not restore replacement"); }
+    finally { choiceSaving.current = false; setChoiceBusy(false); }
+  };
+  const forkReference = async () => {
+    if (choiceSaving.current || !videoId) return;
+    choiceSaving.current = true; setChoiceBusy(true); setChoiceError(null);
+    try {
+      await flushWorkspace.current();
+      const res = await fetch(`/api/downloads/${encodeURIComponent(filename)}/fork`, { method: "POST" });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error);
+      window.location.assign(`/editing/${encodeURIComponent(data.filename)}?view=clips`);
+    } catch (e) { setChoiceError(e instanceof Error ? e.message : "Could not create another edit"); }
+    finally { choiceSaving.current = false; setChoiceBusy(false); }
   };
 
   // Seek the main player to a time (storyboard beats, shot cards)
@@ -1321,7 +1360,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
 
     // Existing recommendations already carry a trim window; only manual
     // picks arrive without one
-    if (!videoId || rec?.trim_start != null) return;
+    if (referenceMode || !videoId || rec?.trim_start != null) return;
     setTrimmingShot(shotIdx);
     try {
       const res = await fetch(`/api/analyze/${videoId}/recommendations/trim`, {
@@ -1406,6 +1445,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   };
   const seekPreview = (requestedTime: number) => {
     if (!analysis) return;
+    if (referenceMode) { setPreviewClip(null); setReferenceView(false); }
     if (workspace?.showSource) setPanelTab("video");
     const time = previewTime(requestedTime, analysis.shots.at(-1)?.end_time ?? 0);
     const s = analysis.shots.find(s => intersects(time, s.start_time, s.end_time));
@@ -1492,7 +1532,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
       ? {
           mode: "source",
           boundsFor: (index) => timelineData?.sources[index] ?? null,
-          busy: retiming || !timelineData || timelineData.sources.some(s => !s) || rendering || matching || !!brollBusy,
+          busy: choiceBusy || preparation.busy || retiming || !timelineData || timelineData.sources.some(s => !s) || rendering || matching || !!brollBusy,
           onCommit: patchShotTimes,
           snap: sourceBacked && masterSegs?.words.length ? snapToWords : undefined,
         }
@@ -1522,6 +1562,18 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
     if (inspector !== effectiveInspector) setInspector(effectiveInspector);
     if (frameTarget !== activeFrameTarget) setFrameTarget(activeFrameTarget);
   }, [inspector, effectiveInspector, frameTarget, activeFrameTarget]);
+  const referenceTimeline = (s: AnalysisShot) => {
+    const choice = recs?.shots.find(r => r.shot_index === s.index);
+    const resolved = framing.sources[String(s.index)]?.[0];
+    const candidate = choice?.recommendations.find(r => r.filename === choice.selected_filename);
+    const unavailable = !!resolved?.warning?.startsWith("Needs replacement") || (!choice?.keep_source && candidate?.duration != null && candidate.duration - (candidate.trim_start ?? 0) < s.end_time - s.start_time - 0.001);
+    const original = choice?.keep_source || unavailable || !choice?.selected_filename;
+    return {
+      screenshot: original ? shotThumb(s) : thumbSrc(choice!.selected_filename!),
+      sourceName: original ? "Reference" : choice!.selected_filename!,
+      replacementStatus: !choice || choice.needs_replacement || unavailable ? "Needs replacement" : original ? "Original" : choice.choice_origin === "automatic" ? "Suggested" : "Selected",
+    };
+  };
   const previewSources = framing.sources[String(selectedShot)] ?? [];
   const brollBlocks = (brollTrack?.segments ?? []).map((s) => {
     const r = brollResolved.find((x) => x.id === s.id);
@@ -2117,6 +2169,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
         {viralityTab}
         <button onClick={() => setPanelTab("upload")} className={tabClass("upload")}>Upload Footage</button>
       </>}
+      {!workspace && referenceMode && <button onClick={() => setPanelTab("upload")} className={tabClass("upload")}>Upload Footage</button>}
       <button disabled={!hasEdit} onClick={() => setPanelTab("clips")} className={tabClass("clips")}>Replace shot</button>
       <button onClick={() => setPanelTab("variations")} className={tabClass("variations")}>Suggestions</button>
       {!workspace && viralityTab}
@@ -2182,16 +2235,29 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
 
 
   return (
-    <div className={`downloads-layout flex flex-col items-center min-h-screen p-4 bg-background text-foreground ${analysis || workspace ? styles.workspace : ""}`}>
+    <div className={`downloads-layout flex flex-col items-center min-h-screen p-4 bg-background text-foreground ${analysis || workspace || referenceMode ? styles.workspace : ""}`}>
       <div ref={contentRef}
-        className={`flex flex-col gap-6 w-full ${analysis || workspace ? styles.content : "max-w-sm"}`}
+        className={`flex flex-col gap-6 w-full ${analysis || workspace || referenceMode ? styles.content : "max-w-sm"}`}
       >
         {/* Ribbon 1: video player + the active tab's panel */}
-        <div ref={upperRef} className={analysis || workspace ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
-          <div className={`${styles.player} mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0`}>
+        <div ref={upperRef} className={analysis || workspace || referenceMode ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
+          <div className={`${styles.player} ${referenceMode ? styles.referencePlayer : ""} mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0`}>
+            {referenceMode && <div className="flex flex-wrap gap-2 text-xs">
+              <button aria-pressed={!referenceView && !previewClip} onClick={() => { setReferenceView(false); setPreviewClip(null); }} className="rounded border border-border px-3 py-1.5">My edit</button>
+              <button aria-pressed={referenceView} onClick={() => { videoRef.current?.pause(); setReferenceView(true); setPreviewClip(null); }} className="rounded border border-border px-3 py-1.5">Reference</button>
+              <button disabled={!analysis || choiceBusy || preparation.busy || matching} onClick={() => void forkReference()} className="rounded border border-border px-3 py-1.5 disabled:opacity-50">Create another edit</button>
+            </div>}
+            {referenceMode && (referenceView || previewClip) && <div className={`space-y-2 ${styles.referencePreview}`}>
+              <p className="text-xs text-muted-foreground">{previewClip ? "Previewing alternative · not applied" : `Reference · segment ${selectedShot + 1}`}</p>
+              <video key={`${previewClip?.filename ?? filename}:${selectedShot}`} src={previewClip ? clipSrc(previewClip.filename) : `/api/downloads/${encodeURIComponent(filename)}`} controls playsInline muted={!!previewClip} preload="metadata"
+                onLoadedMetadata={e => { e.currentTarget.currentTime = previewClip ? previewClip.start ?? 0 : shot?.source_start ?? shot?.start_time ?? 0; }}
+                onTimeUpdate={e => { const end = previewClip ? previewClip.end : shot?.source_end ?? shot?.end_time; if (end != null && e.currentTarget.currentTime >= end && !e.currentTarget.paused) e.currentTarget.pause(); }}
+                className="aspect-[9/16] w-full rounded-lg bg-black object-contain" />
+              {previewClip && <button disabled={choiceBusy} onClick={() => void patchSelection(previewClip.filename).then(saved => { if (saved) { setPreviewClip(null); setReferenceView(false); } })} className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">Use clip</button>}
+            </div>}
             {workspace?.showSource ? workspace.preview : <>
             <div className={shot ? "hidden" : "rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center"}>
-              {playbackError ? (
+              {preparation.job?.status === "downloading" ? <p className="p-6 text-xs text-white/70">Downloading reference video…</p> : playbackError ? (
                 <div className="p-6 text-center">
                   <p className="text-sm font-medium text-white">
                     This file isn&apos;t a playable video
@@ -2230,7 +2296,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
                 )
               )}
             </div>
-            {shot && (
+            {shot && <div className={referenceMode && (referenceView || previewClip) ? "hidden" : referenceMode ? styles.referenceFrame : ""}>
               <FramingEditor textCues={previewTextCues} externalLayerSelector state={framing} clock={videoRef} shot={shot} source={previewSources} controlsTarget={framingControlsTarget}
                 broll={previewBroll} target={activeFrameTarget}
                 onTarget={setFrameTarget} onSeek={seekPreview}
@@ -2240,18 +2306,25 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
                   const time = videoRef.current?.currentTime ?? 0;
                   return sourceBacked ? shot.start_time + time - (shot.source_start ?? shot.start_time) + sourceOffset(shot.index) : time;
                 }} />
-            )}
+            </div>}
             </>}
           </div>
 
-          <section ref={editingPanelRef} aria-label="Editing panel" tabIndex={0} className={`flex flex-col gap-3 min-w-0 ${analysis || workspace ? styles.panel : ""}`}>
-            {(analysis || workspace) && (
+          <section ref={editingPanelRef} aria-label="Editing panel" tabIndex={0} className={`flex flex-col gap-3 min-w-0 ${analysis || workspace || referenceMode ? styles.panel : ""}`}>
+            {(analysis || workspace || referenceMode) && (
               <div className="flex shrink-0 flex-col gap-3">
+                {preparation.job && preparation.job.status !== "ready" && <div role="status" className="rounded-lg border border-border p-3 text-xs">
+                  <p className={preparation.busy ? "animate-pulse" : ""}>{REFERENCE_STAGES[preparation.job.status]}</p>
+                  {preparation.job.error && <p className="mt-1 text-red-500">{preparation.job.error}</p>}
+                  {preparation.job.status === "failed" && <button className="mt-2 underline" onClick={() => void preparation.retryJob()}>Retry preparation</button>}
+                </div>}
+                {choiceError && (!referenceMode || panelTab !== "clips") && <p role="alert" className="text-xs text-red-500">{choiceError}</p>}
+                {preparation.error && <p role="alert" className="text-xs text-red-500">{preparation.error}</p>}
                 {workspace ? <>{workspace.header}{hasEdit && panelTab === "video" && titleBlock}</> : titleBlock}
                 {tabBar}
               </div>
             )}
-            {!analysis && !workspace && (
+            {!analysis && !workspace && !referenceMode && (
               <>
                 {titleBlock}
                 {geminiActions}
@@ -2259,6 +2332,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
             )}
 
             {workspace?.panel}
+            {referenceMode && !workspace && panelTab === "upload" && <ReferenceFootagePanel busy={choiceBusy || matching || preparation.busy || rendering} onReplace={range => patchSelection(range.filename, selectedShot, range.start)} />}
             {workspace && panelTab === "upload" && <StoryboardFootagePanel videoId={workspace.sourceId} mode="upload" onIncluded={workspace.onFootageIncluded} timelineBusy={retiming || rendering || !!brollBusy} onTimeline={hasEdit ? addTimelineFootage : undefined} />}
             {workspace && !hasEdit && !["storyboards", "upload", "virality"].includes(panelTab) && <p className="rounded-lg border border-border p-4 text-sm text-muted-foreground">Choose a storyboard and press Use storyboard &amp; edit to start your timeline.</p>}
             {analysis && hasEdit && (
@@ -2299,7 +2373,15 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
                 )}
                 {/* Shots: one card per shot — time, section, what
                     happens, the fix note, and the text on/under the shot */}
-                {panelTab === "clips" &&
+                {panelTab === "clips" && referenceMode && recs && shot && videoId && <ReferenceReplacements
+                  videoId={videoId} index={selectedShot} duration={shot.end_time - shot.start_time} description={shot.description}
+                  recs={recs as StoredRecommendations} generation={generation} busy={choiceBusy || matching || preparation.busy || rendering} error={choiceError ?? matchError ?? (previewSources[0]?.warning?.startsWith("Needs replacement") ? previewSources[0].warning : null)}
+                  onGeneration={setGeneration} onAccept={(g, data) => { setGeneration(g); setRecs(data as ShotRecommendations); setPreviewClip(null); setReferenceView(false); }}
+                  onChoose={file => patchSelection(file).then(saved => { if (saved) { setPreviewClip(null); setReferenceView(false); } return saved; })}
+                  onKeep={() => void patchKeepSource(true)} onPreview={clip => { videoRef.current?.pause(); setReferenceView(false); setPreviewClip(clip); }}
+                  onLibrary={() => setAllClipsOpen(true)} onUpload={() => setPanelTab("upload")} onMatch={() => void handleMatch()}
+                  onHistory={action => void replacementHistory(action)} thumbSrc={thumbSrc} />}
+                {panelTab === "clips" && !(referenceMode && recs) &&
                   (!recs ? (
                     <div className="rounded-lg border border-border p-4 flex flex-col gap-3 items-start">
                       <p className="text-sm text-muted-foreground">
@@ -2651,6 +2733,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
                 {/* Render Details: once a render exists, TikTok drafts +
                     warnings come first; then the pipeline buttons + render
                     settings, the analysis summary, and the render output */}
+                {referenceMode && panelTab === "render" && recs?.shots.some(s => s.needs_replacement) && <p role="alert" className="rounded border border-amber-500/40 p-3 text-xs text-amber-500">Some segments still need replacements. Choose a clip or Keep original in Replace shot before exporting.</p>}
                 {panelTab === "render" && (
                   <div className="flex flex-col gap-3">
                     {render && (
@@ -3182,7 +3265,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <h2 id="editor-timeline-heading" className="text-sm font-bold uppercase tracking-wide">Timeline</h2>
               <span className="text-xs text-muted-foreground">Clip {selectedShot + 1} · {(shot.end_time - shot.start_time).toFixed(2)}s · Total {analysis.shots[analysis.shots.length - 1].end_time.toFixed(2)}s</span>
-              <fieldset disabled={!timelineData || timelineData.sources.some(s => !s) || retiming || rendering || matching || textSaving || textAligning || noteSaving || !!brollBusy || framing.status === "Saving"} className="ml-auto flex flex-wrap items-center gap-1 disabled:opacity-50">
+              <fieldset disabled={choiceBusy || preparation.busy || !timelineData || timelineData.sources.some(s => !s) || retiming || rendering || matching || textSaving || textAligning || noteSaving || !!brollBusy || framing.status === "Saving"} className="ml-auto flex flex-wrap items-center gap-1 disabled:opacity-50">
                 <button onClick={openClipTrim} title="Adjust length" className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted"><Scissors className="size-3" /> Adjust length</button>
                 <button disabled={selectedShot === 0} onClick={() => void editClips({ type: "move", index: selectedShot, to: selectedShot - 1 })} aria-label="Move clip left" title="Move clip left" className="rounded p-2 hover:bg-muted disabled:opacity-30"><ArrowLeft className="size-3" /></button>
                 <button disabled={selectedShot === analysis.shots.length - 1} onClick={() => void editClips({ type: "move", index: selectedShot, to: selectedShot + 1 })} aria-label="Move clip right" title="Move clip right" className="rounded p-2 hover:bg-muted disabled:opacity-30"><ArrowRight className="size-3" /></button>
@@ -3201,7 +3284,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
               onSeek={seconds => { const video = videoRef.current; if (video) { video.currentTime = seconds - sourceOffset(selectedShot); void playMedia(video).catch(() => {}); } }} />}
             <div aria-label="Timeline tracks and transcript" tabIndex={0} className={styles.timelineContent}>
               <ShotTimeline
-                footage={workspace && hasEdit ? { busy: retiming || rendering || !!brollBusy || textSaving || noteSaving, onDrop: (range, action, index, offset) => { void addTimelineFootage(range, action, index, offset); } } : undefined}
+                footage={referenceMode ? { allowInsert: false, busy: choiceBusy || matching || rendering || preparation.busy, onDrop: (range, action, index) => { if (action === "replace") void patchSelection(range.filename, index, range.start); else if (action === "broll") void brollPlaceRec(index, { filename: range.filename, trim_start: range.start }); } } : workspace && hasEdit ? { busy: retiming || rendering || !!brollBusy || textSaving || noteSaving, onDrop: (range, action, index, offset) => { void addTimelineFootage(range, action, index, offset); } } : undefined}
                 text={{ enabled: burnText, entry: textEntry, label: i => textEntry(i).matchSpeech ? textWords(i).map(w => w.text).join(" ") : textEntry(i).text,
                   onSelect: selectText, onMatchSpeech: matchSpeech, busy: textSaving || textAligning }}
                 instructions={{ notes: editNotes, drafts: instructionDrafts, onDraftChange: changeInstruction, busy: noteSaving || rendering, onSave: saveNote, onApply: () => void handleRender() }}
@@ -3209,9 +3292,8 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
                   ...s,
                   source_start: s.source_start ?? s.start_time,
                   source_end: s.source_end ?? s.end_time,
-                  screenshot: shotThumb(s),
-                  title: s.description,
-                  sourceName: s.source_clip ?? filename,
+                  screenshot: shotThumb(s), title: s.description, sourceName: s.source_clip ?? filename,
+                  ...(referenceMode ? referenceTimeline(s) : {}),
                 }))}
                 selectedShot={selectedShot}
                 playheadTime={playheadTime}
@@ -3222,10 +3304,10 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
                   const section = sectionForShot(i);
                   return section ? SECTION_BADGES[section] : null;
                 }}
-                onSelectShot={(index, seek) => { setInspector("frame"); setPanelTab("video"); selectShot(index, seek); }}
+                onSelectShot={(index, seek) => { setInspector("frame"); if (!(referenceMode && panelTab === "clips")) setPanelTab("video"); setPreviewClip(null); selectShot(index, seek); }}
                 confidenceStyles={CONFIDENCE_STYLES}
                 recs={
-                  recs
+                  recs && !referenceMode
                     ? {
                         byShot: recsByShot,
                         selectedByShot,

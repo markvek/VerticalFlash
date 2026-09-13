@@ -134,6 +134,7 @@ export type Recommendation = z.infer<typeof RecommendationZ>;
 // Full stored recommendations file: analysis/<videoId>.recommendations.json
 export const ShotRecommendationsZ = z.object({
   videoId: z.string(),
+  mode: z.literal("reference").optional(),
   generatedAt: z.string(),
   model: z.string(),
   clipsConsidered: z.number(),
@@ -143,6 +144,8 @@ export const ShotRecommendationsZ = z.object({
       recommendations: z.array(RecommendationZ),
       // User-confirmed clip choice for this shot (from the Select button)
       selected_filename: z.string().nullable().optional(),
+      choice_origin: z.enum(["automatic", "user", "generated"]).optional(),
+      needs_replacement: z.boolean().optional(),
       // User editing intent for remake iteration:
       // locked = preserve the current product/clip, recycle = find a new
       // library clip, generate = make a new AI clip for this shot.

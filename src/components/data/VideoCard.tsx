@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Play, X } from "lucide-react";
 import type { Video } from "@/lib/tikhub";
 import { formatCount } from "@/lib/utils";
@@ -23,6 +24,8 @@ const STAGE_LABELS: Record<Exclude<DownloadStage, "idle" | "done" | "error">, st
 };
 
 export function VideoCard({ video }: { video: Video }) {
+  const router = useRouter();
+  const [opening, setOpening] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [stage, setStage] = useState<DownloadStage>("idle");
   const [stageError, setStageError] = useState<string | null>(null);
@@ -33,6 +36,26 @@ export function VideoCard({ video }: { video: Video }) {
     video.authorHandle && video.id
       ? `https://www.tiktok.com/@${video.authorHandle}/video/${video.id}`
       : null;
+
+  useEffect(() => {
+    if (!video.id) return;
+    const controller = new AbortController();
+    fetch(`/api/reference-import/${video.id}?availability=1`, { signal: controller.signal }).then(r => r.ok ? r.json() : null)
+      .then(job => { if (job?.filename) setSavedFilename(job.filename); }).catch(() => {});
+    return () => controller.abort();
+  }, [video.id]);
+  const openEditor = async () => {
+    if (opening) return;
+    setOpening(true); setStageError(null);
+    try {
+      const res = await fetch(`/api/reference-import/${video.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ author: video.authorHandle }) });
+      const job = await res.json();
+      if (!res.ok) throw new Error(job.error || "Could not open editor");
+      setSavedFilename(job.filename);
+      router.push(`/editing/${encodeURIComponent(job.filename)}?view=clips`);
+    } catch (e) { setStageError(e instanceof Error ? e.message : "Could not open editor"); setStage("error"); }
+    finally { setOpening(false); }
+  };
 
   const handleDownload = async () => {
     if (stage !== "idle" && stage !== "done" && stage !== "error") return;
@@ -185,6 +208,9 @@ export function VideoCard({ video }: { video: Video }) {
         <div className="mt-1 text-xs text-muted-foreground">
           @{video.authorHandle}
         </div>
+        {video.id && <button disabled={opening} onClick={event => { event.stopPropagation(); void openEditor(); }} className="mt-2 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">
+          {opening ? "Opening editor…" : savedFilename ? "Open editor" : "Download & edit"}
+        </button>}
         {stage !== "idle" && (
           <div
             className="mt-1 text-xs"
@@ -195,7 +221,7 @@ export function VideoCard({ video }: { video: Video }) {
             ) : stage === "done" ? (
               savedFilename ? (
                 <a
-                  href={`/downloads/${encodeURIComponent(savedFilename)}`}
+                  href={`/editing/${encodeURIComponent(savedFilename)}?view=clips`}
                   className="text-primary hover:underline"
                 >
                   Ready — open in editor
@@ -240,7 +266,7 @@ export function VideoCard({ video }: { video: Video }) {
           onClick={handleDownload}
           className="flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted/50 rounded transition-colors"
         >
-          <span>Download</span>
+          <span>Download file</span>
           <svg className="size-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path
               strokeLinecap="round"

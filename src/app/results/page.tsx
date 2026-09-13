@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ScanResults } from "@/components/data/ScanResults";
@@ -13,6 +13,9 @@ function ResultsContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { scans, createScan, setCurrentScanId } = useScanHistory();
+  const requestedScan = useRef<string | null>(null);
+  const scanRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => { scanRequest.current?.abort(); requestedScan.current = null; }, []);
   const [data, setData] = useState<ScanResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +33,7 @@ function ResultsContent() {
 
     // If scan ID provided, load from localStorage
     if (scanId) {
+      requestedScan.current = `saved:${scanId}`;
       const scan = scans.find((s) => s.id === scanId);
       if (scan) {
         setCurrentScanId(scanId);
@@ -50,10 +54,19 @@ function ResultsContent() {
       return;
     }
 
+    const requestKey = searchParams.toString();
+    // Context updates while saving scan history must not start the same
+    // search again or navigate over the user's Download & edit action.
+    if (requestedScan.current === requestKey) return;
+    requestedScan.current = requestKey;
+    scanRequest.current?.abort();
+    const controller = new AbortController();
+    scanRequest.current = controller;
     async function fetchData() {
       try {
         const response = await fetch("/api/scan", {
           method: "POST",
+          signal: controller.signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             hashtags,
@@ -70,6 +83,7 @@ function ResultsContent() {
         }
 
         const result: ScanResult = await response.json();
+        if (controller.signal.aborted || requestedScan.current !== requestKey) return;
 
         // Create new scan in history with seed parameters
         const seeds: ScanSeeds = {
@@ -92,9 +106,10 @@ function ResultsContent() {
         // Update URL to use scan ID instead of seed parameters
         router.replace(`/results?scan=${newScan.id}`);
       } catch (err) {
+        if (controller.signal.aborted || requestedScan.current !== requestKey) return;
         setError(err instanceof Error ? err.message : "An error occurred");
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
 

@@ -1,3 +1,7 @@
+import { seedReferenceDraft } from "@/lib/reference-draft";
+import { readReferenceImport } from "@/lib/reference-import";
+import { withProjectEdit } from "@/lib/project-edit-lock";
+import { saveReferenceRecommendations, prepareReferenceSelection } from "@/lib/reference-selection";
 import { projectModel } from "@/lib/models/native";
 import { clipDescription, clipTags } from "@/lib/library-metadata";
 import { NextRequest, NextResponse } from "next/server";
@@ -385,7 +389,11 @@ export async function GET(
 
 // Save/clear the user's confirmed clip choice, remake edit intent, and/or
 // "use original footage" flag (keep_source) for one shot.
-export async function PATCH(
+export async function PATCH(request: NextRequest, context: { params: Promise<{ videoId: string }> }) {
+  const { videoId } = await context.params;
+  return withProjectEdit(videoId, () => patchLocked(request, context));
+}
+async function patchLocked(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -397,6 +405,7 @@ export async function PATCH(
   let shotIndex: number;
   let filename: string | null = null;
   let hasFilename = false;
+  let trimStart: number | undefined;
   let editIntent: (typeof EDIT_INTENTS)[number] | null | undefined;
   let keepSource: boolean | null | undefined;
   try {
@@ -404,6 +413,7 @@ export async function PATCH(
     shotIndex = body.shot_index;
     hasFilename = Object.prototype.hasOwnProperty.call(body, "filename");
     filename = body.filename ?? null;
+    trimStart = body.trim_start;
     editIntent =
       Object.prototype.hasOwnProperty.call(body, "edit_intent")
         ? body.edit_intent
@@ -414,7 +424,8 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
-  if (typeof shotIndex !== "number") {
+  if (trimStart !== undefined && (typeof trimStart !== "number" || !Number.isFinite(trimStart) || trimStart < 0)) return NextResponse.json({ error: "Invalid clip start" }, { status: 400 });
+  if (!Number.isInteger(shotIndex) || shotIndex < 0) {
     return NextResponse.json(
       { error: "shot_index is required" },
       { status: 400 }
@@ -452,7 +463,7 @@ export async function PATCH(
     // browses beyond the per-shot recommendations); unknown names are
     // still rejected
     if (hasFilename && filename !== null) {
-      if (basename(filename) !== filename) {
+      if (typeof filename !== "string" || basename(filename) !== filename) {
         return NextResponse.json({ error: "invalid filename" }, { status: 400 });
       }
       // Generated clips live in generated/<videoId>/, not the library
@@ -477,12 +488,17 @@ export async function PATCH(
     }
     if (hasFilename) {
       shot.selected_filename = filename;
+      if (filename) shot.keep_source = false;
     }
     if (editIntent !== undefined) {
       shot.edit_intent = editIntent;
     }
     if (keepSource !== undefined) {
       shot.keep_source = keepSource;
+    }
+    if (stored.mode === "reference") {
+      if (trimStart !== undefined) { const selected = shot.recommendations.find(r => r.filename === filename); if (selected) selected.trim_start = trimStart; }
+      await prepareReferenceSelection(stored, shotIndex, hasFilename ? filename : undefined, keepSource, trimStart);
     }
     // Manual entries only exist to carry a selection — drop any that are
     // no longer the pick so cleared choices don't linger as cards
@@ -491,21 +507,22 @@ export async function PATCH(
         (r) => r.source !== "manual" || r.filename === filename
       );
     }
-    await fs.writeFile(
-      recommendationsPath(videoId),
-      JSON.stringify(stored, null, 2)
-    );
+    await saveReferenceRecommendations(stored);
     return NextResponse.json(stored);
   } catch (error) {
     console.error("selection save failed:", error);
     return NextResponse.json(
-      { error: "No recommendations found for this video" },
-      { status: 404 }
+      { error: error instanceof Error ? error.message : "Selection failed" },
+      { status: 400 }
     );
   }
 }
 
-export async function POST(
+export async function POST(request: NextRequest, context: { params: Promise<{ videoId: string }> }) {
+  const { videoId } = await context.params;
+  return withProjectEdit(videoId, () => postLocked(request, context));
+}
+async function postLocked(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
@@ -522,9 +539,17 @@ export async function POST(
     );
   }
 
+  const previousRaw = await fs.readFile(recommendationsPath(videoId), "utf8").catch((e: NodeJS.ErrnoException) => { if (e.code === "ENOENT") return null; throw e; });
+  const previous = previousRaw ? ShotRecommendationsZ.parse(JSON.parse(previousRaw)) : null;
+  const reference = previous?.mode === "reference" || !!await readReferenceImport(videoId);
   let catalog: CatalogClip[];
   try { catalog = await loadCatalog(); }
   catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Could not load clip catalog" }, { status: 500 }); }
+  if (catalog.length === 0 && reference) {
+    const draft = seedReferenceDraft(analysis, { videoId, generatedAt: new Date().toISOString(), model: "library", clipsConsidered: 0, shots: [] }, previous);
+    await saveReferenceRecommendations(draft);
+    return NextResponse.json(draft);
+  }
   if (catalog.length === 0) {
     return NextResponse.json(
       {
@@ -699,7 +724,7 @@ export async function POST(
     });
     await Promise.all(workers);
 
-    const stored: ShotRecommendations = {
+    let stored: ShotRecommendations = {
       videoId,
       generatedAt: new Date().toISOString(),
       model: getGeminiModel(ai),
@@ -712,10 +737,16 @@ export async function POST(
       },
     };
 
-    await fs.writeFile(
-      recommendationsPath(videoId),
-      JSON.stringify(ShotRecommendationsZ.parse(stored), null, 2)
-    );
+    if (reference) {
+      // Probe disk, rather than trusting stale library metadata. Failed AI
+      // trims remain unresolved until the user explicitly chooses a moment.
+      const { probeDuration } = await import("@/lib/master-assemble");
+      for (const entry of stored.shots) for (const rec of entry.recommendations) {
+        if (!isGeneratedClip(rec.filename)) rec.duration = await probeDuration(join(LIBRARY_DIR, rec.filename));
+      }
+      stored = seedReferenceDraft(analysis, stored, previous);
+    }
+    await saveReferenceRecommendations(ShotRecommendationsZ.parse(stored));
 
     return NextResponse.json(stored);
   } catch (error) {

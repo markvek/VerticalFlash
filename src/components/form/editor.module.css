@@ -101,3 +101,17 @@
     flex: 1 1 0;
   }
 }
+
+@media (min-width: 1024px) {
+  .workspace .referencePlayer {
+    overflow: auto;
+    overscroll-behavior: contain;
+    --reference-preview-height: max(100px, calc(var(--preview-height) - 110px));
+  }
+
+  .referenceFrame,
+  .referencePreview video {
+    width: min(100%, calc(var(--reference-preview-height) * 9 / 16));
+    margin-inline: auto;
+  }
+}
