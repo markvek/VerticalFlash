@@ -1,3 +1,4 @@
+import { projectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { loadLibrary } from "@/lib/library-store";
 import { promises as fs } from "fs";
@@ -70,7 +71,7 @@ export async function POST(
     const clipDuration =
       library.videos.find((v) => v.filename === filename)?.duration ?? null;
 
-    const ai = getGeminiClient();
+    const ai = getGeminiClient(await projectModel(videoId));
     const { windows } = await generateTrimWindows(ai, filename, clipDuration, [
       {
         shot_index: shotIndex,

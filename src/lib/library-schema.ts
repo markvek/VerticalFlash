@@ -79,6 +79,7 @@ export const LibraryClipZ = z.object({
   filename: z.string(),
   date: z.string().datetime().optional().nullable(),
   tags: z.array(z.string()).optional(),
+  rejected_tags: z.array(z.string()).optional(),
   description: z.string().optional().nullable(),
   source: z.string().optional().nullable(),
   duration: z.number().optional().nullable(),

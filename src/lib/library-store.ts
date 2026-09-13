@@ -1,3 +1,5 @@
+import { randomUUID } from "crypto";
+import { withProjectEdit } from "./project-edit-lock";
 import { promises as fs } from "fs";
 import { extname, join } from "path";
 import { LIBRARY_DIR, LIBRARY_METADATA_FILE } from "./paths";
@@ -40,37 +42,50 @@ function upgradeLegacyFields(raw: unknown): { library: ClipLibrary; migrated: bo
   return { library: ClipLibraryZ.parse(data), migrated };
 }
 
-export async function loadLibrary(): Promise<ClipLibrary> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(LIBRARY_METADATA_FILE, "utf8");
-  } catch {
-    return emptyLibrary();
-  }
-  try {
-    const { library, migrated } = upgradeLegacyFields(JSON.parse(raw));
-    if (migrated) {
-      console.log(
-        `[library] Upgraded legacy analysis fields in ${LIBRARY_METADATA_FILE}`
-      );
-      await saveLibrary(library);
-    }
-    return library;
-  } catch (error) {
-    console.error(`[library] Could not parse ${LIBRARY_METADATA_FILE}:`, error);
-    return emptyLibrary();
+export class LibraryRecoveryError extends Error {
+  constructor() {
+    super("Library metadata could not be read or validated. The original file was preserved. Restore .metadata.json from a valid .metadata.json.bak backup before saving.");
+    this.name = "LibraryRecoveryError";
   }
 }
 
+export function withLibraryEdit<T>(work: () => Promise<T>): Promise<T> {
+  return withProjectEdit("library-metadata", work);
+}
+
+async function readCatalog(): Promise<{ raw: string; library: ClipLibrary } | null> {
+  let raw: string;
+  try { raw = await fs.readFile(LIBRARY_METADATA_FILE, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new LibraryRecoveryError();
+  }
+  try { return { raw, library: upgradeLegacyFields(JSON.parse(raw)).library }; }
+  catch { throw new LibraryRecoveryError(); }
+}
+
+export async function loadLibrary(): Promise<ClipLibrary> {
+  return (await readCatalog())?.library ?? emptyLibrary();
+}
+
 export async function saveLibrary(library: ClipLibrary): Promise<void> {
+  const validated = ClipLibraryZ.parse(library);
   await fs.mkdir(LIBRARY_DIR, { recursive: true });
-  // Temp-file + rename so a crash mid-write can't truncate the library
-  const tmp = `${LIBRARY_METADATA_FILE}.tmp`;
-  await fs.writeFile(
-    tmp,
-    JSON.stringify(ClipLibraryZ.parse(library), null, 2)
-  );
-  await fs.rename(tmp, LIBRARY_METADATA_FILE);
+  // Never replace an unreadable catalog, including saves from stale callers.
+  const previous = await readCatalog();
+  const tmp = `${LIBRARY_METADATA_FILE}.${randomUUID()}.tmp`;
+  const backupTmp = `${tmp}.bak`;
+  try {
+    if (previous) {
+      await fs.writeFile(backupTmp, previous.raw);
+      await fs.rename(backupTmp, `${LIBRARY_METADATA_FILE}.bak`);
+    }
+    await fs.writeFile(tmp, JSON.stringify(validated, null, 2));
+    await fs.rename(tmp, LIBRARY_METADATA_FILE);
+  } finally {
+    await fs.rm(tmp, { force: true });
+    await fs.rm(backupTmp, { force: true });
+  }
 }
 
 export function isVideoFilename(filename: string): boolean {

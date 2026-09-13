@@ -474,6 +474,8 @@ export interface DiscoveryData {
 }
 
 export interface ScanResult {
+  status?: "complete" | "partial";
+  errors?: Array<{ query: string; kind: string; message: string }>;
   hashtags: HashtagData[];
   keywords: KeywordData[];
   competitors: CompetitorData[];

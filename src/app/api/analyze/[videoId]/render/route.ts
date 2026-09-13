@@ -1,3 +1,5 @@
+import { captureRenderInputs, revisionFromSnapshot, renderIsStale, exportOperations } from "@/lib/render-revision";
+import { RenderManifestZ } from "@/lib/render-schema";
 import { textOverlaysPath } from "@/lib/text-overlays-store";
 import { NextRequest, NextResponse } from "next/server";
 import { readFraming } from "@/lib/framing-store";
@@ -31,7 +33,7 @@ import type { BrollRenderSegment } from "@/lib/render-remake";
 export const maxDuration = 300;
 
 // One render per video at a time (single-process dev server, no job queue)
-const inFlight = new Set<string>();
+const inFlight = exportOperations;
 
 async function findVideoFile(videoId: string): Promise<string | null> {
   return (await findDownloadFile(videoId))?.path ?? null;
@@ -48,7 +50,8 @@ export async function GET(
 
   try {
     const raw = await fs.readFile(renderManifestPath(videoId), "utf8");
-    return NextResponse.json(JSON.parse(raw));
+    const manifest = RenderManifestZ.parse(JSON.parse(raw));
+    return NextResponse.json({ ...manifest, stale: await renderIsStale(manifest) });
   } catch {
     return NextResponse.json(
       { error: "No render found for this video" },
@@ -105,6 +108,9 @@ export async function POST(
       return ffmpegErrorResponse(error)!;
     }
 
+    const requestedOptions = { audio, music_filename: audio === "music" ? musicFilename : null, burn_text: burnText };
+    const inputSnapshot = await captureRenderInputs(videoId, requestedOptions);
+    const editRevision = revisionFromSnapshot(inputSnapshot);
     let analysis: Analysis;
     try {
       const raw = await fs.readFile(
@@ -170,19 +176,25 @@ export async function POST(
     try {
       const raw = await fs.readFile(editNotesPath(videoId), "utf8");
       editNotes = EditNotesZ.parse(JSON.parse(raw)).notes;
-    } catch {
-      // no notes saved yet
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Saved clip instructions could not be read. Repair them before exporting.");
     }
 
     let textOverlays: TextOverlays | null = null;
     try {
       const raw = await fs.readFile(textOverlaysPath(videoId), "utf8");
       textOverlays = TextOverlaysZ.parse(JSON.parse(raw));
-    } catch {
-      // none saved — the burn falls back to the analysis's detected text
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Saved text overlays could not be read. Repair them before exporting.");
     }
 
+    const initialWarnings = brollTrack.segments.filter(s => s.status === "placed" && (!s.clip || !brollResolved.get(s.id)?.valid))
+      .map(s => `B-roll ${s.id}: placement is invalid — choose a clip and adjust its timeline range`);
     const manifest = await renderRemake({
+      inputSnapshot,
+      editRevision,
+      requestedOptions,
+      initialWarnings,
       framing,
       originalSources: await shotSources(videoPath, analysis),
       videoId,
@@ -200,7 +212,7 @@ export async function POST(
       broll,
     });
 
-    return NextResponse.json(manifest);
+    return NextResponse.json({ ...manifest, stale: await renderIsStale(manifest) });
   } catch (error) {
     console.error("render failed:", error);
     return NextResponse.json(

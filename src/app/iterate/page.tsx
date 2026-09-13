@@ -252,7 +252,7 @@ export default function IteratePage() {
 
       setStage(v.id, { stage: "done", filename });
       router.push(
-        `/downloads/${encodeURIComponent(filename)}?tab=variations`
+        `/downloads/${encodeURIComponent(filename)}?view=variations`
       );
     } catch (err) {
       setStage(v.id, {
@@ -470,7 +470,7 @@ export default function IteratePage() {
                       )}
                       {p?.stage === "done" && p.filename && (
                         <Link
-                          href={`/downloads/${encodeURIComponent(p.filename)}?tab=variations`}
+                          href={`/downloads/${encodeURIComponent(p.filename)}?view=variations`}
                           className="text-xs text-primary hover:underline"
                         >
                           Ready — open in editor

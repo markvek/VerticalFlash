@@ -1,8 +1,9 @@
+import { projectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
 import type { GoogleGenAI } from "@google/genai";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel } from "@/lib/gemini";
 import { AnalysisZ, type Analysis } from "@/lib/analysis-schema";
 import { generateShotPrompts } from "@/lib/generation-prompts";
 import { classifyGeminiError } from "@/lib/library-analyze";
@@ -61,7 +62,7 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Gemini not configured" },
@@ -94,7 +95,7 @@ export async function POST(
       shot.prompt_source = "gemini";
     }
     generations.promptsGeneratedAt = new Date().toISOString();
-    generations.promptModel = GEMINI_MODEL;
+    generations.promptModel = getGeminiModel(ai);
     if (usage) {
       generations.promptUsage = {
         promptTokens:

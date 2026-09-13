@@ -41,11 +41,18 @@ export async function POST(
     return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
   }
 
+  let submittedPrompt: string | undefined;
   let shotIndex: number;
   let useReferences = true;
   try {
     const body = await request.json();
     shotIndex = body.shot_index;
+    if (body.prompt !== undefined) {
+      if (typeof body.prompt !== "string" || !body.prompt.trim() || body.prompt.length > 4000) {
+        return NextResponse.json({ error: "prompt must contain 1–4000 characters" }, { status: 400 });
+      }
+      submittedPrompt = body.prompt.trim();
+    }
     if (body.use_references === false) useReferences = false;
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
@@ -67,7 +74,7 @@ export async function POST(
   }
 
   const generations = await loadGenerations(videoId);
-  const prompt = generations.shots[String(shotIndex)]?.prompt?.trim();
+  const prompt = submittedPrompt ?? generations.shots[String(shotIndex)]?.prompt?.trim();
   if (!prompt) {
     return NextResponse.json(
       { error: "No generation prompt for this shot — draft one first" },

@@ -1,3 +1,8 @@
+import { tiktokUploadState } from "@/lib/tiktok-upload-state";
+import { RenderManifestZ, type RenderManifest } from "@/lib/render-schema";
+import { renderDeliveryError, renderBytesMatch, exportOperations } from "@/lib/render-revision";
+import { renderManifestPath } from "@/lib/render-remake";
+import { sidecarPath } from "@/lib/paths";
 import { NextRequest, NextResponse } from "next/server";
 import { execFileAsync } from "@/lib/ffmpeg";
 import { promises as fs } from "fs";
@@ -24,22 +29,25 @@ const CHUNK_SIZE = 10 * 1024 * 1024;
 export const maxDuration = 300;
 
 // One upload per video at a time (same pattern as the render route)
-const inFlight = new Set<string>();
+const inFlight = exportOperations;
 
 // Successful uploads append a publish record (best-effort — recordPublish
 // never throws) so the published post can be matched back to this render
-async function uploadSuccess(videoId: string, publishId: string, status: string) {
-  await recordPublish({ videoId, publishId, status });
-  return NextResponse.json({ success: true, publishId, status });
+async function uploadResult(videoId: string, publishId: string, status: string, manifest: RenderManifest, captionOptions: string[], uploadedAt: string) {
+  await recordPublish({ videoId, publishId, status, manifest, captionOptions, uploadedAt });
+  const { httpStatus, ...state } = tiktokUploadState(status);
+  return NextResponse.json({ ...state, publishId, status }, { status: httpStatus });
 }
 
 export async function POST(request: NextRequest) {
   // Drafts can't carry a caption — TikTok's inbox upload takes bytes only;
   // the user writes the caption in the TikTok app when posting
+  let expectedExportId: string | undefined;
   let videoId = "";
   try {
     const body = await request.json();
     videoId = String(body?.videoId ?? "");
+    expectedExportId = body?.exportId;
   } catch {
     // fall through to validation below
   }
@@ -57,6 +65,21 @@ export async function POST(request: NextRequest) {
   inFlight.add(videoId);
 
   try {
+    const manifest = RenderManifestZ.parse(JSON.parse(await fs.readFile(renderManifestPath(videoId), "utf8")));
+    const deliveryError = await renderDeliveryError(manifest);
+    if (deliveryError) return NextResponse.json({ error: deliveryError }, { status: 409 });
+    if (expectedExportId && expectedExportId !== manifest.exportId) return NextResponse.json({ error: "The export changed. Refresh before uploading." }, { status: 409 });
+    // Snapshot bytes and attribution before network requests or ingestion polling.
+    const videoBytes = await fs.readFile(renderVideoPath(videoId));
+    if (!renderBytesMatch(manifest, videoBytes)) return NextResponse.json({ error: "Export bytes do not match the saved manifest. Export again before uploading." }, { status: 409 });
+    const latestManifest = RenderManifestZ.parse(JSON.parse(await fs.readFile(renderManifestPath(videoId), "utf8")));
+    if (latestManifest.exportId !== manifest.exportId) return NextResponse.json({ error: "The export changed. Retry uploading." }, { status: 409 });
+    let captionOptions: string[] = [];
+    try {
+      const captions = JSON.parse(await fs.readFile(sidecarPath(videoId, "captions"), "utf8"));
+      captionOptions = (captions.captions ?? []).map((c: { text: string }) => c.text).filter((text: unknown): text is string => typeof text === "string");
+    } catch { /* captions are optional */ }
+    const uploadedAt = new Date().toISOString();
     let accessToken: string;
     try {
       accessToken = await getValidAccessToken();
@@ -73,7 +96,7 @@ export async function POST(request: NextRequest) {
     const videoPath = renderVideoPath(videoId);
     let videoSize: number;
     try {
-      videoSize = (await fs.stat(videoPath)).size;
+      videoSize = videoBytes.length;
     } catch {
       return NextResponse.json(
         { error: `No render found for video ${videoId} — render it first` },
@@ -160,15 +183,13 @@ export async function POST(request: NextRequest) {
 
     // TikTok wants exactly total_chunk_count PUTs; the last chunk absorbs
     // the remainder, so compute ranges off the chunk index
-    const file = await fs.open(videoPath, "r");
-    try {
+    {
       for (let i = 0; i < totalChunks; i++) {
         const first = i * chunkSize;
         const last =
           i === totalChunks - 1 ? videoSize - 1 : first + chunkSize - 1;
         const length = last - first + 1;
-        const buffer = Buffer.alloc(length);
-        await file.read(buffer, 0, length, first);
+        const buffer = videoBytes.subarray(first, first + length);
 
         const putRes = await fetch(uploadUrl, {
           method: "PUT",
@@ -186,8 +207,6 @@ export async function POST(request: NextRequest) {
           );
         }
       }
-    } finally {
-      await file.close();
     }
 
     // Poll until TikTok finishes ingesting the bytes we just sent
@@ -203,9 +222,10 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({ publish_id: publishId }),
       });
       const statusData = await statusRes.json();
+      if (!statusRes.ok || statusData?.error?.code !== "ok") continue;
       status = statusData?.data?.status || status;
       if (status === "SEND_TO_USER_INBOX" || status === "PUBLISH_COMPLETE") {
-        return uploadSuccess(videoId, publishId, status);
+        return uploadResult(videoId, publishId, status, manifest, captionOptions, uploadedAt);
       }
       if (status === "FAILED") {
         return NextResponse.json(
@@ -219,7 +239,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Still processing — the draft usually lands shortly after
-    return uploadSuccess(videoId, publishId, status);
+    return uploadResult(videoId, publishId, status, manifest, captionOptions, uploadedAt);
   } catch (error) {
     console.error("TikTok upload failed:", error);
     return NextResponse.json(

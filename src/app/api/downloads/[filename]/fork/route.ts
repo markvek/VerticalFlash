@@ -1,9 +1,12 @@
+import { randomUUID } from "crypto";
+import { VariationsZ, type Variations, type Variation, variationsPath } from "@/lib/variations-schema";
+import { applyVariation } from "@/lib/apply-variation";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { extractVideoId, splitVersion } from "@/lib/video-id";
 import { SIDECAR_KINDS } from "@/lib/sidecars";
-import { ANALYSIS_DIR, DOWNLOADS_DIR, EDITING_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
+import { analysisPath, ANALYSIS_DIR, DOWNLOADS_DIR, EDITING_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
 import { listProjectFiles, resolveProjectFile } from "@/lib/download-files";
 
 const NAMES_FILE = join(DOWNLOADS_DIR, ".names.json");
@@ -75,9 +78,22 @@ export async function POST(
   if (!source) {
     return NextResponse.json({ error: "File not found" }, { status: 404 });
   }
-  if (!(await exists(join(RENDERS_DIR, `${srcId}.render.json`)))) {
+  let variations: Variations | null = null;
+  let variation: Variation | null = null;
+  try {
+    const body = await request.json().catch(() => ({}));
+    if (body.variation_id !== undefined) {
+      variations = VariationsZ.parse(JSON.parse(await fs.readFile(variationsPath(srcId), "utf8")));
+      variation = variations.suggestions.find(v => v.id === body.variation_id) ?? null;
+      if (!variation) throw new Error("Suggestion not found");
+    }
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid suggestion" }, { status: 400 });
+  }
+  const hasRender = await exists(join(RENDERS_DIR, `${srcId}.render.json`));
+  if (!hasRender && !variation && !await exists(analysisPath(srcId))) {
     return NextResponse.json(
-      { error: "Only videos with a completed remake render can be forked" },
+      { error: "Analyze this video before duplicating its edit" },
       { status: 409 }
     );
   }
@@ -152,7 +168,7 @@ export async function POST(
         .catch(() => {});
 
       // The rendered remake itself — required for a "completed" fork
-      await fs.copyFile(
+      if (hasRender && !variation) await fs.copyFile(
         join(RENDERS_DIR, `${srcId}.mp4`),
         join(RENDERS_DIR, `${newId}.mp4`)
       );
@@ -184,18 +200,24 @@ export async function POST(
       }
 
       // Render manifest must exist (checked above) and point at the fork
-      const manifest = JSON.parse(
-        await fs.readFile(join(RENDERS_DIR, `${srcId}.render.json`), "utf8")
-      );
-      manifest.videoId = newId;
-      if (manifest.framing) manifest.framing.videoId = newId;
-      manifest.output = `${newId}.mp4`;
-      // Prompt projects render with a null sourceVideo — keep it null
-      if (manifest.sourceVideo != null) manifest.sourceVideo = newFile;
-      await fs.writeFile(
-        join(RENDERS_DIR, `${newId}.render.json`),
-        JSON.stringify(manifest, null, 2)
-      );
+      if (hasRender && !variation) {
+        const manifest = JSON.parse(
+          await fs.readFile(join(RENDERS_DIR, `${srcId}.render.json`), "utf8")
+        );
+        manifest.videoId = newId;
+        manifest.exportId = randomUUID();
+        delete manifest.editRevision;
+        if (manifest.framing) manifest.framing.videoId = newId;
+        manifest.output = `${newId}.mp4`;
+        // Prompt projects render with a null sourceVideo — keep it null
+        if (manifest.sourceVideo != null) manifest.sourceVideo = newFile;
+        await fs.writeFile(
+          join(RENDERS_DIR, `${newId}.render.json`),
+          JSON.stringify(manifest, null, 2)
+        );
+
+      }
+      if (variation && variations) await applyVariation(newId, variation, variations);
 
       const names = await loadNames();
       const displayName = `${names[srcFile] ?? baseStem} (v${nextV})`.slice(

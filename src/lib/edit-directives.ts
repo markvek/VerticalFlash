@@ -1,3 +1,4 @@
+import { clipDescription } from "@/lib/library-metadata";
 import { z } from "zod";
 import { Type, createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
@@ -128,7 +129,7 @@ function buildPrompt(
       filename: v.filename,
       duration_s: v.duration ?? undefined,
       time_of_day: v.analysis!.time_of_day,
-      description: (v.description || v.analysis!.description).slice(0, 120),
+      description: clipDescription(v).slice(0, 120),
     }));
 
   const prompt = `You translate a video editor's free-text fix notes into structured

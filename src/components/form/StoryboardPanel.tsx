@@ -1,4 +1,5 @@
 "use client";
+import { trackEditSave } from "@/lib/edit-save-tracker";
 
 import { NativeModelSelector } from "@/components/form/NativeModelSelector";
 
@@ -36,6 +37,15 @@ import {
 // the normal editor flow.
 
 export interface StoryboardPanelProps {
+  selectedIdea?: string;
+  onIdeaChange?: (id: string) => void;
+  adoptedIdea?: string;
+  adoptedRevision?: number;
+  activeEdit?: string;
+  onBeforeAccept?: () => Promise<void>;
+  onEditCreated?: (filename: string) => Promise<void>;
+  onOpenEdit?: (filename: string) => Promise<void>;
+  onReturnToEdit?: () => void;
   videoId: string;
   filename: string;
   onSeek?: (seconds: number, source?: FootageSource, request?: number) => void;
@@ -114,7 +124,7 @@ function beatMatchesSegment(beat: Beat, segment: Segment): boolean {
   );
 }
 
-export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
+export function StoryboardPanel({ selectedIdea, onIdeaChange, adoptedIdea, adoptedRevision, activeEdit, onBeforeAccept, onEditCreated, onOpenEdit, onReturnToEdit, videoId, filename, onOpenReview, onSeek, onStopPreview, previewMedia, footagePanel, refreshKey = 0 }: StoryboardPanelProps) {
   const [model, setModel] = useState("");
   const [segments, setSegments] = useState<MasterSegments | null>(null);
   const [storyboards, setStoryboards] = useState<MasterStoryboards | null>(null);
@@ -144,6 +154,11 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
   const [notice, setNotice] = useState<string | null>(null);
   const reviews = useStoryboardReviews(videoId, storyboards?.storyboards.map(s => `${s.id}:${s.revision ?? 1}`).join(",") ?? "");
 
+  useEffect(() => { if (selectedIdea) setActiveStoryboardId(selectedIdea); }, [selectedIdea]);
+  const ideaChanged = useRef(onIdeaChange); ideaChanged.current = onIdeaChange;
+  useEffect(() => { if (activeStoryboardId) ideaChanged.current?.(activeStoryboardId); }, [activeStoryboardId]);
+  const acceptingRef = useRef(false);
+  const acceptanceRequest = useRef<{ signature: string; key: string } | null>(null);
   const [accepting, setAccepting] = useState<string | null>(null);
   const [acceptedNow, setAcceptedNow] = useState<
     Record<string, { filename: string; displayName: string }>
@@ -265,6 +280,7 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
     setSaving(true);
     setError(null);
     try {
+      return await trackEditSave(videoId, async () => {
       const res = await fetch(`/api/master/${videoId}/storyboards`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -277,6 +293,7 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
       if (!res.ok) throw new Error(data.error || `Save failed (HTTP ${res.status})`);
       if (data.storyboards) setStoryboards(data.storyboards);
       return data.storyboard as Storyboard;
+      }, storyboard.id);
     } finally {
       setSaving(false);
     }
@@ -442,15 +459,20 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
   };
 
   const accept = async (sb: Storyboard) => {
+    if (acceptingRef.current) return;
+    acceptingRef.current = true;
     setAccepting(sb.id);
     setError(null);
     setNotice(null);
     try {
+      await onBeforeAccept?.();
       const saved = await saveStoryboard(sb);
+      const signature = JSON.stringify([saved.id, saved.revision, addText, addBroll]);
+      if (acceptanceRequest.current?.signature !== signature) acceptanceRequest.current = { signature, key: crypto.randomUUID() };
       const res = await fetch(`/api/master/${videoId}/storyboards/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ storyboard_id: saved.id, revision: saved.revision ?? 1, add_text: addText && !!activeReview?.text.length, add_broll: addBroll && !!activeReview?.broll.length }),
+        body: JSON.stringify({ request_id: acceptanceRequest.current.key, storyboard_id: saved.id, revision: saved.revision ?? 1, add_text: addText && !!activeReview?.text.length, add_broll: addBroll && !!activeReview?.broll.length }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Failed (HTTP ${res.status})`);
@@ -459,10 +481,13 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
         [saved.id]: { filename: data.filename, displayName: data.displayName },
       }));
       window.dispatchEvent(new Event("downloads-changed"));
+      await onEditCreated?.(data.filename);
+      acceptanceRequest.current = null;
       setNotice(data.warnings?.length ? data.warnings.join(" ") : "Editing project created. Your selected additions are ready to edit.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not cut the short");
     } finally {
+      acceptingRef.current = false;
       setAccepting(null);
     }
   };
@@ -507,8 +532,8 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
         <div className="flex max-w-full overflow-x-auto" role="tablist" aria-label="Storyboard ideas">
           {(storyboards?.storyboards ?? []).map((storyboard, index) => <button key={storyboard.id} role="tab" aria-selected={activeStoryboard?.id === storyboard.id && !controlsOpen}
             onClick={() => { stopPreview(); setActiveStoryboardId(storyboard.id); setControlsOpen(false); }}
-            className={`shrink-0 border border-border px-4 py-2 text-xs font-semibold first:rounded-l-md ${activeStoryboard?.id === storyboard.id && !controlsOpen ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/40"}`}>
-            Idea {index + 1}
+            className={`shrink-0 border px-4 py-2 text-xs font-semibold first:rounded-l-md ${adoptedIdea === storyboard.id ? "border-green-500 ring-1 ring-inset ring-green-500" : "border-border"} ${activeStoryboard?.id === storyboard.id && !controlsOpen ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/40"}`}>
+            Idea {index + 1}{adoptedIdea === storyboard.id && <span className="ml-2 text-green-500">In this edit</span>}
           </button>)}
           <button role="tab" aria-selected={controlsOpen || !storyboards} onClick={() => { stopPreview(); setControlsOpen(true); }}
             className={`shrink-0 rounded-r-md border border-border px-4 py-2 text-xs font-semibold ${controlsOpen || !storyboards ? "bg-muted text-foreground" : "text-muted-foreground"}`}>
@@ -746,16 +771,18 @@ export function StoryboardPanel({ videoId, filename, onOpenReview, onSeek, onSto
             <p className="text-[11px] text-muted-foreground">Optional additions based on this storyboard review. Text is separate from speech captions. Strong B-roll matches are placed over your original audio; unmatched windows stay as suggestions.</p>
             {reviews.error && <p role="alert" className="text-xs text-red-400">{reviews.error}</p>}
           </div>
+          {activeEdit && <p className="text-xs text-muted-foreground">{adoptedIdea === activeStoryboard.id ? `This edit uses ${adoptedRevision ? `revision ${adoptedRevision}` : "its saved storyboard"}. You are viewing revision ${activeStoryboard.revision ?? 1}. Changes to this idea apply only to a new edit.` : "Browsing another idea. Your active timeline stays unchanged."}</p>}
           <div className="flex flex-wrap items-center gap-2">
+            {adoptedIdea === activeStoryboard.id && onReturnToEdit && <button className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground" onClick={onReturnToEdit}>Return to edit</button>}
             <button onClick={() => previewing ? stopPreview() : preview(activeStoryboard)} disabled={!onSeek}
               className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-xs font-semibold disabled:opacity-50">
               {previewing ? <Square className="size-3" /> : <Play className="size-3" />}{previewing ? "Stop preview" : "Preview"}
             </button>
             <button disabled={accepting !== null || saving} onClick={() => accept(activeStoryboard)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">
-              {accepting && <Loader2 className="size-3 animate-spin" />}{accepting ? "Creating edit..." : selectedAccepted ? "Create another edit" : "Start Edit"}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-xs font-semibold disabled:opacity-50 ${adoptedIdea === activeStoryboard.id ? "border border-border" : "bg-primary text-primary-foreground"}`}>
+              {accepting && <Loader2 className="size-3 animate-spin" />}{accepting ? "Creating edit..." : activeEdit ? "Create new edit from this idea" : selectedAccepted ? "Create another edit" : "Use storyboard & edit"}
             </button>
-            {selectedAccepted && <a href={`/editing/${encodeURIComponent(selectedAccepted)}`} className="text-xs underline">Open editing project</a>}
+            {selectedAccepted && (onOpenEdit ? <button onClick={() => void onOpenEdit(selectedAccepted).catch(e => setError(e.message))} className="text-xs underline">Open existing edit</button> : <a href={`/editing/${encodeURIComponent(selectedAccepted)}`} className="text-xs underline">Open existing edit</a>)}
           </div>
         </div>}
         {error && <p role="alert" className="text-xs text-red-400">{error}</p>}

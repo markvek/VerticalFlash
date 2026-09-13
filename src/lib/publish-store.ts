@@ -1,3 +1,6 @@
+import type { RenderManifest } from "./render-schema";
+import { withProjectEdit } from "./project-edit-lock";
+import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import { PUBLISH_STORE_PATH, sidecarPath } from "./paths";
 import { z } from "zod";
@@ -9,6 +12,9 @@ import { renderManifestPath } from "./render-remake";
 // from — the manifest and captions files get overwritten by re-renders.
 
 export const PublishRecordZ = z.object({
+  exportId: z.string().optional(),
+  filename: z.string().nullable().optional(),
+  editRevision: z.string().optional(),
   videoId: z.string(),
   // Render version uploaded (1 until versioning lands; manifests without a
   // version field are implicitly v1)
@@ -50,12 +56,14 @@ export async function readPublishStore(): Promise<PublishStore> {
 }
 
 async function appendPublishRecord(record: PublishRecord): Promise<void> {
-  const store = await readPublishStore();
-  store.publishes.push(PublishRecordZ.parse(record));
-  const path = storePath();
-  const tmp = `${path}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(store, null, 2));
-  await fs.rename(tmp, path);
+  return withProjectEdit("publish-store", async () => {
+    const store = await readPublishStore();
+    store.publishes.push(PublishRecordZ.parse(record));
+    const path = storePath();
+    const tmp = `${path}.${randomUUID()}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(store, null, 2));
+    await fs.rename(tmp, path);
+  });
 }
 
 // Record a successful upload, snapshotting the render manifest and caption
@@ -66,14 +74,16 @@ export async function recordPublish(opts: {
   videoId: string;
   publishId: string;
   status: string;
+  manifest?: RenderManifest;
+  captionOptions?: string[];
+  uploadedAt?: string;
 }): Promise<void> {
   try {
     let version = 1;
     let renderedAt: string | null = null;
     let durationSeconds: number | null = null;
     try {
-      const raw = await fs.readFile(renderManifestPath(opts.videoId), "utf8");
-      const manifest = JSON.parse(raw);
+      const manifest = opts.manifest ?? JSON.parse(await fs.readFile(renderManifestPath(opts.videoId), "utf8"));
       if (typeof manifest?.version === "number") version = manifest.version;
       if (typeof manifest?.renderedAt === "string")
         renderedAt = manifest.renderedAt;
@@ -101,13 +111,16 @@ export async function recordPublish(opts: {
     }
 
     await appendPublishRecord({
+      exportId: opts.manifest?.exportId,
+      filename: opts.manifest?.sourceVideo,
+      editRevision: opts.manifest?.editRevision,
       videoId: opts.videoId,
       version,
       publishId: opts.publishId,
-      uploadedAt: new Date().toISOString(),
+      uploadedAt: opts.uploadedAt ?? new Date().toISOString(),
       renderedAt,
       durationSeconds,
-      captionOptions,
+      captionOptions: opts.captionOptions ?? captionOptions,
       status: opts.status,
     });
   } catch (error) {

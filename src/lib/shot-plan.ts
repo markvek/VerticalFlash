@@ -1,3 +1,4 @@
+import { clipDescription, clipTags } from "@/lib/library-metadata";
 import { promises as fs } from "fs";
 import { execFileAsync } from "./ffmpeg";
 import { join } from "path";
@@ -38,14 +39,12 @@ export async function loadCatalogSummary(): Promise<CatalogSummary[]> {
     .filter((v) => v.analysis)
     .map((v) => ({
       filename: v.filename,
-      description: v.analysis!.description,
+      description: clipDescription(v),
       category: v.analysis!.category,
       camera_action: v.analysis!.camera_action,
       time_of_day: v.analysis!.time_of_day,
       duration_s: v.duration ?? null,
-      tags: Array.from(
-        new Set([...(v.tags || []), ...v.analysis!.suggested_tags])
-      ).slice(0, 6),
+      tags: clipTags(v).slice(0, 6),
     }));
 }
 

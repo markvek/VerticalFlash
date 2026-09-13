@@ -1,3 +1,6 @@
+import { RenderManifestZ, type RenderManifest } from "@/lib/render-schema";
+import { renderDeliveryError, renderBytesMatch, exportOperations } from "@/lib/render-revision";
+import { renderManifestPath } from "@/lib/render-remake";
 import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import { renderVideoPath } from "@/lib/render-remake";
@@ -7,12 +10,26 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
+  const { videoId } = await params;
+  let claimed = false;
   try {
-    const { videoId } = await params;
     if (!isValidVideoId(videoId)) {
       return NextResponse.json({ error: "invalid videoId" }, { status: 400 });
     }
 
+    if (exportOperations.has(videoId)) return NextResponse.json({ error: "An export or upload is running. Retry shortly." }, { status: 409 });
+    exportOperations.add(videoId); claimed = true;
+    const download = request.nextUrl.searchParams.get("download") === "1";
+    let exportId = videoId;
+    let manifest: RenderManifest | undefined;
+    if (download) {
+      manifest = RenderManifestZ.parse(JSON.parse(await fs.readFile(renderManifestPath(videoId), "utf8")));
+      const error = await renderDeliveryError(manifest);
+      if (error) return NextResponse.json({ error }, { status: 409 });
+      exportId = manifest.exportId ?? videoId;
+      const requestedExport = request.nextUrl.searchParams.get("exportId");
+      if (requestedExport && requestedExport !== exportId) return NextResponse.json({ error: "The export changed. Refresh before downloading." }, { status: 409 });
+    }
     const filePath = renderVideoPath(videoId);
     const fileBuffer = await fs.readFile(filePath).catch(() => null);
     if (!fileBuffer) {
@@ -21,6 +38,8 @@ export async function GET(
         { status: 404 }
       );
     }
+
+    if (download && manifest && !renderBytesMatch(manifest, fileBuffer)) return NextResponse.json({ error: "Export bytes do not match the saved manifest. Export again before downloading." }, { status: 409 });
 
     // MP4 sanity check: ISO Media files carry "ftyp" at bytes 4-8
     if (fileBuffer.length < 12 || fileBuffer.toString("ascii", 4, 8) !== "ftyp") {
@@ -61,7 +80,7 @@ export async function GET(
       headers: {
         "Content-Type": "video/mp4",
         "Content-Length": fileBuffer.length.toString(),
-        "Content-Disposition": `inline; filename="remake-${videoId}.mp4"`,
+        "Content-Disposition": `${download ? "attachment" : "inline"}; filename="remake-${videoId}-${exportId}.mp4"`,
         "Accept-Ranges": "bytes",
       },
     });
@@ -71,5 +90,7 @@ export async function GET(
       { error: "Failed to load render" },
       { status: 500 }
     );
+  } finally {
+    if (claimed) exportOperations.delete(videoId);
   }
 }

@@ -1,4 +1,5 @@
 "use client";
+import { trackEditSave } from "@/lib/edit-save-tracker";
 
 import { useEffect, useRef, useState } from "react";
 import { GEMINI_OMNI_VIDEO_OUT_PER_SEC } from "@/lib/gemini-pricing";
@@ -124,6 +125,7 @@ export function GenerationPanel({
     const trimmed = draft.trim();
     if (trimmed === (entry?.prompt ?? "")) return;
     try {
+      await trackEditSave(videoId, async () => {
       const res = await fetch(`/api/analyze/${videoId}/generation`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -132,6 +134,8 @@ export function GenerationPanel({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Save failed");
       onGeneration(data);
+      setError(null);
+      }, `generation:${shotIndex}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed");
     }
@@ -273,6 +277,7 @@ export function GenerationPanel({
             runAction("generate", {
               shot_index: shotIndex,
               use_references: useReferences,
+              prompt: draft.trim(),
             })
           }
           disabled={generating || drafting || !draft.trim()}

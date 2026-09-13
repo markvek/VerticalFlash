@@ -5,6 +5,7 @@ import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import { MIN_SHOT_SECONDS, type RetimeEdit } from "@/lib/shot-retime";
 import { ShotInstructionEditor } from "@/components/form/ShotInstructionEditor";
 import type { ShotOverlay } from "@/lib/text-overlays-schema";
+import { FOOTAGE_DRAG_TYPE, readFootageDrag, type FootageRange } from "@/lib/footage-drag";
 import { MIN_BROLL_SECONDS } from "@/lib/broll-resolve";
 import type { Word } from "@/lib/segments-schema";
 import { TimelinePlayhead } from "./TimelinePlayhead";
@@ -88,6 +89,7 @@ export interface TimelineBroll {
 }
 
 export interface ShotTimelineProps {
+  footage?: { busy: boolean; onDrop: (range: FootageRange, action: "insert" | "replace" | "broll", index: number, offset?: number) => void };
   text?: { enabled: boolean; entry: (index: number) => ShotOverlay; label: (index: number) => string; onSelect: (index: number) => void; onMatchSpeech: (index: number, enabled: boolean) => void; busy: boolean };
   instructions?: { notes: Record<string, string>; drafts?: Record<string, string>; onDraftChange?: (index: number, text: string) => void; busy: boolean; onSave: (index: number, text: string) => Promise<boolean>; onApply?: () => void };
   shots: TimelineShot[];
@@ -165,6 +167,7 @@ const CHIP_STYLES: Record<string, { chip: string; badge: string; edge: string }>
 };
 
 export function ShotTimeline({
+  footage,
   shots,
   selectedShot,
   playheadTime,
@@ -182,6 +185,12 @@ export function ShotTimeline({
   text,
   instructions,
 }: ShotTimelineProps) {
+  const [footageTarget, setFootageTarget] = useState<string | null>(null);
+  const dropHandlers = (action: "insert" | "replace" | "broll", index: number) => ({
+    onDragOver: (event: React.DragEvent<HTMLElement>) => { if (!footage || footage.busy || !event.dataTransfer.types.includes(FOOTAGE_DRAG_TYPE)) return; event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "copy"; setFootageTarget(`${action}:${index}`); },
+    onDragLeave: () => setFootageTarget(null),
+    onDrop: (event: React.DragEvent<HTMLElement>) => { setFootageTarget(null); const range = readFootageDrag(event.dataTransfer); if (!range || !footage || footage.busy) return; event.preventDefault(); event.stopPropagation(); footage.onDrop(range, action, index); },
+  });
   const TEXT_HEIGHT = 64, BROLL_HEIGHT = broll ? 64 : 0;
   const VIDEO_TOP = TEXT_HEIGHT + BROLL_HEIGHT;
   const [drag, setDrag] = useState<DragState | null>(null);
@@ -438,6 +447,12 @@ export function ShotTimeline({
       {/* Scrollable tracks */}
       <div ref={timelineRef} className={`relative overflow-x-auto ${drag || blockDrag ? "select-none" : ""}`}>
         <div className="relative" style={{ width: totalWidth }}>
+          {footage && Array.from({ length: shots.length + 1 }, (_, index) => <div key={`insert-${index}`} aria-label={`Insert footage ${index === shots.length ? "at end" : `before shot ${index + 1}`}`} {...dropHandlers("insert", index)}
+            className={`absolute z-20 flex w-5 items-center justify-center rounded border border-dashed text-xs ${footageTarget === `insert:${index}` ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background/80 text-muted-foreground"}`}
+            style={{ top: VIDEO_TOP, height: 64, left: index === shots.length ? totalWidth - 20 : leftOf(index) }} title={index === shots.length ? "Insert at end" : `Insert before shot ${index + 1}`}>+</div>)}
+          {footage && shots.map(s => <div key={`replace-${s.index}`} {...dropHandlers("replace", s.index)} aria-label={`Replace shot ${s.index + 1} with footage`}
+            className={`absolute z-20 truncate rounded border border-dashed px-1 text-center text-[9px] ${footageTarget === `replace:${s.index}` ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background/90 text-muted-foreground"}`}
+            style={{ top: VIDEO_TOP + 44, left: leftOf(s.index) + 22, width: Math.max(20, widthFor(s.index) - 44) }}>Replace</div>)}
           {/* Playhead */}
           <TimelinePlayhead time={playheadTime} duration={shots.at(-1)?.end_time ?? 0} pxPerSec={pxPerSec}
             timelineRef={timelineRef} onSeek={onSeek} onScrubStart={onScrubStart} onScrubEnd={onScrubEnd} />
@@ -485,7 +500,8 @@ export function ShotTimeline({
                     </div>
                   </div>
                   {broll && <div className="h-16 w-full border-b border-border" />}
-                  <div data-main-clip={s.index} className={`flex flex-col rounded-lg ring-1 ring-inset overflow-hidden ${s.index === selectedShot ? "ring-orange-500/70 bg-primary/10" : "ring-border bg-muted/20"}`}>
+                  <div data-main-clip={s.index} className={`relative flex flex-col rounded-lg ring-1 ring-inset overflow-hidden ${s.index === selectedShot ? "ring-orange-500/70 bg-primary/10" : "ring-border bg-muted/20"}`}>
+
                   {/* Shot chip (Paper LLW-0): the frame cropped on the
                       left, then time range, section pill, and the shot's
                       line; edge markers echo the draggable boundaries */}
@@ -622,8 +638,11 @@ export function ShotTimeline({
               clicks to start a new segment */}
           {broll && (
             <div
-              className="absolute left-0 right-0"
+              className={`absolute left-0 right-0 ${footageTarget === "broll" ? "bg-violet-500/20 ring-1 ring-inset ring-violet-500" : ""}`}
               style={{ top: TEXT_HEIGHT, height: BROLL_HEIGHT }}
+              onDragOver={event => { if (footage && !footage.busy && event.dataTransfer.types.includes(FOOTAGE_DRAG_TYPE)) { event.preventDefault(); setFootageTarget("broll"); } }}
+              onDragLeave={() => setFootageTarget(null)}
+              onDrop={event => { setFootageTarget(null); const range = readFootageDrag(event.dataTransfer); if (!range || !footage || footage.busy) return; event.preventDefault(); const time = (event.clientX - event.currentTarget.getBoundingClientRect().left) / pxPerSec; const shot = shots.find(s => time >= s.start_time && time < s.end_time); if (shot) footage.onDrop(range, "broll", shot.index, time - shot.start_time); }}
               onClick={(e) => {
                 if (e.target !== e.currentTarget || broll.busy) return;
                 const rect = e.currentTarget.getBoundingClientRect();

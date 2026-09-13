@@ -1,3 +1,7 @@
+import { renderIssues } from "./render-quality";
+import { randomUUID, createHash } from "crypto";
+import { revisionFromSnapshot, type RenderInputSnapshot, type RenderOptions } from "./render-revision";
+import { projectModel } from "./models/native";
 import { overlayForShot, resolveTextCues } from "./text-cues";
 import { promises as fs } from "fs";
 import { encodeFramedClip } from "./framing-render";
@@ -534,6 +538,7 @@ async function fillMissingTrims(
   clipDurations: Map<string, number | null>,
   warnings: string[]
 ): Promise<void> {
+  const originalRecs = JSON.stringify(recs);
   const shotByIndex = new Map(analysis.shots.map((s) => [s.index, s]));
   const clipTargets = new Map<string, TrimTarget[]>();
   for (const p of planned) {
@@ -557,7 +562,7 @@ async function fillMissingTrims(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch {
     warnings.push(
       "Gemini is not configured — clips without a trim window are cut from the clip start"
@@ -618,10 +623,13 @@ async function fillMissingTrims(
   // Persist the freshly generated windows (planned shots share the rec
   // objects inside `recs`, so the updates above are already in it)
   try {
-    await fs.writeFile(
-      join(ANALYSIS_DIR, `${videoId}.recommendations.json`),
-      JSON.stringify(ShotRecommendationsZ.parse(recs), null, 2)
-    );
+    const path = join(ANALYSIS_DIR, `${videoId}.recommendations.json`);
+    const saved = ShotRecommendationsZ.parse(JSON.parse(await fs.readFile(path, "utf8")));
+    if (JSON.stringify(saved) === originalRecs) {
+      const tmp = `${path}.${randomUUID()}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(ShotRecommendationsZ.parse(recs), null, 2));
+      await fs.rename(tmp, path);
+    }
   } catch (error) {
     console.error("failed to persist on-demand trim windows:", error);
   }
@@ -835,9 +843,7 @@ async function assembleShotAudio(
         { maxBuffer: FFMPEG_MAX_BUFFER }
       );
     } else {
-      if (!src) {
-        warnings.push(`Shot ${p.shot_index + 1}: footage not found — its audio is silent`);
-      }
+      warnings.push(`Shot ${p.shot_index + 1}: ${src ? "footage has no readable audio track" : "footage not found"} — its audio is silent`);
       await execFileAsync(
         "ffmpeg",
         [
@@ -872,6 +878,10 @@ async function assembleShotAudio(
 }
 
 export interface RenderInput {
+  inputSnapshot?: RenderInputSnapshot;
+  editRevision?: string;
+  requestedOptions?: RenderOptions;
+  initialWarnings?: string[];
   framing?: FramingDocument;
   originalSources?: Record<string, FrameSource[]>;
   videoId: string;
@@ -1049,7 +1059,7 @@ export async function renderRemake(
   } = input;
   const audioMode: "music" | "original" | "none" =
     input.audio ?? (includeOriginalAudio ? "original" : "none");
-  const warnings: string[] = [];
+  const warnings: string[] = [...(input.initialWarnings ?? [])];
   const libraryClipCount = library.videos.filter((v) => v.analysis).length;
   const clipTimes = new Map<string, string | null>(
     library.videos.map((v) => [v.filename, v.analysis?.time_of_day ?? null])
@@ -1060,7 +1070,7 @@ export async function renderRemake(
   let directives = new Map<number, EditDirective>();
   if (Object.keys(editNotes).length > 0) {
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(await projectModel(videoId));
       const interpreted = await interpretEditNotes(
         ai,
         analysis,
@@ -1645,10 +1655,26 @@ export async function renderRemake(
     }
 
     const durationSeconds = (await probeDuration(finalPath)) ?? 0;
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error("The encoded video has no playable duration");
+    const expectedDuration = analysis.shots.at(-1)?.end_time ?? 0;
+    if (Math.abs(durationSeconds - expectedDuration) > 0.15) warnings.push("Export duration differs from the timeline — check missing or truncated shots and export again");
+    for (const shot of planned) {
+      if (shot.clip_source === "none" || shot.fill === "black") warnings.push(`Shot ${shot.shot_index + 1}: black footage — select a clip that covers this shot and export again`);
+    }
     // Atomic replace: a killed render never corrupts an existing output
     await fs.rename(finalPath, renderVideoPath(videoId));
 
+    const issues = renderIssues(warnings);
     const manifest: RenderManifest = RenderManifestZ.parse({
+      exportId: randomUUID(),
+      outputSha256: createHash("sha256").update(await fs.readFile(renderVideoPath(videoId))).digest("hex"),
+      editRevision: input.inputSnapshot ? revisionFromSnapshot({
+        ...input.inputSnapshot,
+        inputs: input.inputSnapshot.inputs.map((value, index) => index === 1 ? recs : value),
+      }) : input.editRevision,
+      requestedOptions: input.requestedOptions,
+      issues,
+      status: issues.length ? "preview_with_issues" : "ready",
       framing,
       videoId,
       renderedAt: new Date().toISOString(),

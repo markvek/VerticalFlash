@@ -131,3 +131,70 @@ test("storyboard edits update word text, source bounds, B-roll, and beat metadat
   assert.equal(state.sidecars.broll.segments[0].anchor.shot_index, 1);
   assert.equal(state.project.beats[1].text, "One two. Three");
 });
+
+test("project footage inserts, replaces and overlays independently, with undo and real export sources", async () => {
+  const masterId = "master-timeline", shortId = "short-timeline";
+  const ctx = { params: Promise.resolve({ videoId: shortId }) };
+  const url = `http://localhost/api/analyze/${shortId}/timeline`;
+  const readState = async () => (await api.GET(new NextRequest(url), ctx)).json();
+  const change = async (operation: unknown) => {
+    const current = await readState();
+    return api.PATCH(new NextRequest(url, { method: "PATCH", body: JSON.stringify({ version: current.version, operation }) }), ctx);
+  };
+  const masterPath = join(paths.STORYBOARDS_DIR, `${masterId}.mp4`);
+  await fs.writeFile(`${masterPath}.metadata.json`, JSON.stringify({ kind: "master", title: "Source", createdAt: new Date().toISOString(), sourceClips: [{ filename: "attached.mp4", start: 0, end: 6 }] }));
+  // Keep this fixture's old word-only transcript out of reusable segment discovery.
+  await fs.unlink(paths.sidecarPath(masterId, "segments"));
+  const siblingPath = join(paths.EDITING_DIR, "short-sibling.mp4");
+  await fs.copyFile(join(paths.EDITING_DIR, `${shortId}.mp4`), siblingPath);
+  await fs.copyFile(join(paths.EDITING_DIR, `${shortId}.mp4.metadata.json`), `${siblingPath}.metadata.json`);
+  const siblingBefore = await fs.readFile(`${siblingPath}.metadata.json`, "utf8");
+  const before = await readState();
+  await fs.writeFile(paths.sidecarPath(shortId, "edit-notes"), JSON.stringify({ videoId: shortId, notes: { "1": "Keep this direction" } }));
+  await fs.writeFile(paths.sidecarPath(shortId, "recommendations"), JSON.stringify({ videoId: shortId, generatedAt: new Date().toISOString(), model: "fixture", clipsConsidered: 0, shots: before.analysis.shots.map((s: { index: number }) => ({ shot_index: s.index, keep_source: true, selected_filename: null, recommendations: [] })) }));
+  let res = await change({ type: "insert", index: 1, filename: "attached.mp4", start: 1, end: 2.5 });
+  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  let state = await res.json();
+  assert.equal(state.analysis.shots.length, before.analysis.shots.length + 1);
+  assert.equal(state.analysis.shots[1].source_clip, "attached.mp4");
+  assert.equal(state.sources[1].min, 0);
+  assert.equal(state.sources[1].url, "/api/library/clips/attached.mp4");
+  assert.equal(state.project.beats[1].source.offset, 0);
+  assert.equal(state.sidecars["edit-notes"].notes["2"], "Keep this direction");
+  assert.equal(state.sidecars.recommendations.shots[1].keep_source, true);
+  assert.equal(state.sidecars.broll.segments[0].anchor.shot_index, 2);
+  assert.equal(await fs.readFile(`${siblingPath}.metadata.json`, "utf8"), siblingBefore);
+  for (const operation of [{ type: "insert", index: 99, filename: "attached.mp4", start: 0, end: 1 }, { type: "insert", index: 0, filename: "attached.mp4", start: 0, end: 7 }, { type: "replace", index: 0, filename: "../attached.mp4", start: 0, end: 1 }]) {
+    assert.equal((await change(operation)).status, 400);
+    assert.equal((await readState()).version, state.version);
+  }
+  state = await (await change({ type: "undo" })).json();
+  assert.equal(state.analysis.shots.length, before.analysis.shots.length);
+  state = await (await change({ type: "redo" })).json();
+  assert.equal(state.analysis.shots[1].source_start, 1);
+  res = await change({ type: "replace", index: 2, filename: "attached.mp4", start: 3, end: 5 });
+  assert.equal(res.status, 200);
+  state = await res.json();
+  assert.equal(state.sidecars["edit-notes"].notes["2"], undefined);
+  assert.equal(state.sidecars.broll.segments.length, 0);
+  res = await change({ type: "broll", index: 1, filename: "attached.mp4", start: 2, end: 3, offset: 0.25 });
+  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  state = await res.json();
+  assert.deepEqual(state.sidecars.broll.segments[0].anchor, { kind: "offset", shot_index: 1, offset: 0.25, duration: 1 });
+  assert.equal(state.project.beats[1].source_start, 1, "B-roll preserves narration timing");
+  state = await (await change({ type: "undo" })).json();
+  assert.equal(state.sidecars.broll.segments.length, 0);
+  const { cutdownSourceShots } = await import("../src/lib/cutdown-build");
+  const { shotSources } = await import("../src/lib/framing-sources");
+  const { renderRemake } = await import("../src/lib/render-remake");
+  const { probeDuration } = await import("../src/lib/master-assemble");
+  const sourceShots = await cutdownSourceShots(state.project);
+  assert.equal(sourceShots[1]?.start, 1);
+  assert.equal(sourceShots[1]?.path, join(paths.LIBRARY_DIR, "attached.mp4"));
+  const manifest = await renderRemake({ videoId: shortId, analysis: state.analysis, recs: state.sidecars.recommendations,
+    sourceVideo: `${shortId}.mp4`, library: { videos: [], lastUpdated: new Date().toISOString() }, editNotes: {}, burnText: false, audio: "original",
+    originalSources: await shotSources(join(paths.EDITING_DIR, `${shortId}.mp4`), state.analysis), sourceShots: sourceShots.map(s => s!) });
+  assert(manifest.shots.every(s => s.clip_source === "source"));
+  assert(Math.abs((await probeDuration(join(paths.RENDERS_DIR, `${shortId}.mp4`)))! - state.analysis.shots.at(-1).end_time) < 0.15);
+  assert(!manifest.warnings.some(w => /failed/i.test(w)), manifest.warnings.join("\n"));
+});

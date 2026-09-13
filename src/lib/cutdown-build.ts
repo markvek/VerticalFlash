@@ -137,17 +137,21 @@ export async function cutdownSourceShots(
       const item = attached.find(
         (a) => a.clip.filename === beat.source!.filename && a.offset === beat.source!.offset
       );
-      const local = item ? await findLibraryFile(item.clip.filename) : null;
-      if (!item || !local) {
+      // Timeline insertions reference library time directly (offset zero);
+      // storyboard attachments retain their existing virtual master offset.
+      const local = item || beat.source.offset === 0 ? await findLibraryFile(beat.source.filename) : null;
+      const duration = local ? await probeDuration(local) : null;
+      const offset = item?.offset ?? 0;
+      if (!local || !duration || (!item && beat.source.offset !== 0)) {
         results.push(null);
         continue;
       }
       results.push({
         path: local,
-        filename: item.clip.filename,
-        start: beat.source_start - item.offset,
-        end: beat.source_end - item.offset,
-        bounds: { min: item.offset, max: item.offset + item.duration },
+        filename: beat.source.filename,
+        start: beat.source_start - offset,
+        end: beat.source_end - offset,
+        bounds: { min: offset, max: offset + duration },
       });
     } else if (master && masterDuration) {
       results.push({

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { DownloadCard } from "@/components/data/DownloadCard";
 import type { DownloadEntry } from "@/lib/download-types";
 import { MATCH_MIN_VIEWS } from "@/lib/match-published";
-import { projectHref, projectStage } from "@/lib/project-navigation";
+import { projectHref, projectStage, workspaceProjects } from "@/lib/project-navigation";
 import Link from "next/link";
 
 export function ProjectList({ stage }: { stage?: "storyboarding" | "editing" }) {
@@ -143,7 +143,7 @@ export function ProjectList({ stage }: { stage?: "storyboarding" | "editing" }) 
   // API order is oldest-first (keeps "Download N" numbering stable); the feed
   // reads better most-recently-edited-first — except proven winners (matched
   // to a published post over the view threshold), which lead sorted by views
-  const visible = downloads.filter((file) => !stage || projectStage(file) === stage);
+  const visible = workspaceProjects(downloads).filter((file) => !stage || projectStage(file) === stage);
   const sorted = [...visible].sort((a, b) => {
     const hitA = hitViews[a.name] ?? 0;
     const hitB = hitViews[b.name] ?? 0;
@@ -161,7 +161,7 @@ export function ProjectList({ stage }: { stage?: "storyboarding" | "editing" }) 
           <p className="text-muted-foreground mt-2">
             {visible.length} project{visible.length !== 1 ? "s" : ""}
           </p>
-          {stage === "storyboarding" && <Link href="/storyboard" className="mt-3 inline-block text-sm underline">New storyboard project</Link>}
+          {stage && <Link href="/editing/new" className="mt-3 inline-block text-sm underline">New editing project</Link>}
         </div>
 
         {loading ? (
@@ -177,8 +177,7 @@ export function ProjectList({ stage }: { stage?: "storyboarding" | "editing" }) 
         ) : (
           <div className="space-y-4">
             {sorted.map((file) => (
-              <DownloadCard
-                key={file.name}
+              <div key={file.name} className="min-w-0 space-y-2"><DownloadCard
                 file={file}
                 matchedViews={hitViews[file.name] ?? null}
                 playing={playing === file.name}
@@ -191,6 +190,11 @@ export function ProjectList({ stage }: { stage?: "storyboarding" | "editing" }) 
                 onDelete={() => handleDelete(file.name)}
                 onRename={(name) => handleRename(file.name, name)}
               />
+              {file.project?.kind === "master" && <div className="rounded-lg border border-border p-3 text-xs">
+                <p className="mb-2 font-semibold">{downloads.filter(child => child.project?.kind === "cutdown" && child.project.masterId === file.videoId).length} edits</p>
+                {downloads.filter(child => child.project?.kind === "cutdown" && child.project.masterId === file.videoId).map(child => <Link key={child.name} href={projectHref(child)} className="block truncate py-1 text-muted-foreground underline hover:text-foreground">{child.displayName}{child.render ? " · Exported" : ""}</Link>)}
+              </div>}
+              </div>
             ))}
           </div>
         )}
