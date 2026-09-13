@@ -27,10 +27,42 @@
   overscroll-behavior: contain;
 }
 
+.divider {
+  display: none;
+}
+
 @media (min-width: 1024px) {
+  .divider {
+    display: flex;
+    flex: 0 0 12px;
+    align-items: center;
+    width: 100%;
+    cursor: row-resize;
+    touch-action: none;
+    user-select: none;
+    outline: none;
+  }
+
+  .divider::before {
+    content: "";
+    width: 100%;
+    height: 2px;
+    border-radius: 999px;
+    background: white;
+    opacity: 0.65;
+  }
+
+  .divider:hover::before,
+  .divider:focus-visible::before,
+  .divider[data-dragging]::before {
+    height: 3px;
+    opacity: 1;
+    box-shadow: 0 0 6px rgb(255 255 255 / 25%);
+  }
+
   .workspace {
     /* Reserve space for playback controls and the timeline on shorter screens. */
-    --preview-height: calc(min(568.889px, calc(60dvh - 76px)) * 0.75);
+    --editor-default-upper-height: calc(min(568.889px, calc(60dvh - 76px)) * 0.75 + 44px);
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
@@ -44,7 +76,8 @@
 
   .workspace .upper {
     flex: 0 0 auto;
-    height: calc(var(--preview-height) + 44px);
+    --preview-height: min(480px, calc(var(--editor-upper-height, var(--editor-default-upper-height)) - 44px));
+    height: var(--editor-upper-height, var(--editor-default-upper-height));
     min-height: 0;
     grid-template-columns: minmax(0, calc(var(--preview-height) * 9 / 16)) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);

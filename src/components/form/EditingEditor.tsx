@@ -1,4 +1,5 @@
 "use client";
+import { EditorDivider } from "./EditorDivider";
 import { flushEditSaves } from "@/lib/edit-save-tracker";
 
 import { VariationsPanel } from "@/components/form/VariationsPanel";
@@ -359,6 +360,8 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
   const videoId = extractVideoId(filename);
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const upperRef = useRef<HTMLDivElement>(null);
   const [playbackError, setPlaybackError] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -2176,11 +2179,11 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
 
   return (
     <div className={`downloads-layout flex flex-col items-center min-h-screen p-4 bg-background text-foreground ${analysis || workspace ? styles.workspace : ""}`}>
-      <div
+      <div ref={contentRef}
         className={`flex flex-col gap-6 w-full ${analysis || workspace ? styles.content : "max-w-sm"}`}
       >
         {/* Ribbon 1: video player + the active tab's panel */}
-        <div className={analysis || workspace ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
+        <div ref={upperRef} className={analysis || workspace ? `${styles.upper} grid gap-4 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]` : "flex flex-col gap-4"}>
           <div className={`${styles.player} mx-auto flex w-full max-w-[360px] flex-col gap-4 lg:mx-0`}>
             {workspace?.showSource ? workspace.preview : <>
             <div className={shot ? "hidden" : "rounded-lg overflow-hidden border border-border bg-black aspect-[9/16] flex items-center justify-center"}>
@@ -3168,6 +3171,7 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
 
         {/* Editing-style timeline: shot columns sized by duration, with
             thumbnail / time / description tracks connected by timestamps */}
+        {((workspace && !hasEdit) || (analysis && shot)) && <EditorDivider content={contentRef} upper={upperRef} />}
         {workspace && !hasEdit && <section aria-label="Empty timeline" className={`${styles.timeline} rounded-lg border border-dashed border-border p-6`}><h2 className="text-sm font-bold uppercase">Timeline</h2><p className="mt-3 text-sm text-muted-foreground">Your timeline will appear here when you choose a storyboard.</p></section>}
         {analysis && shot && (
           <section aria-labelledby="editor-timeline-heading" className={`${styles.timeline} flex flex-col gap-3`}>
