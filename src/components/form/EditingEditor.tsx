@@ -2102,6 +2102,11 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
         ? "bg-primary/15 text-primary"
         : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
     }`;
+  const viralityTab = (
+    <button onClick={() => setPanelTab("virality")} className={tabClass("virality")}>
+      Virality Review
+    </button>
+  );
   const tabBar = (
     <div className="flex max-w-full rounded-lg border border-border overflow-x-auto self-start text-xs font-semibold" aria-label="Editor views">
       <button onClick={() => setPanelTab("video")} className={tabClass("video", true)}>
@@ -2109,13 +2114,12 @@ export function EditingEditor({ filenameOverride, workspace }: { filenameOverrid
       </button>
       {workspace && <>
         <button onClick={() => setPanelTab("storyboards")} className={tabClass("storyboards")}>Storyboards</button>
+        {viralityTab}
         <button onClick={() => setPanelTab("upload")} className={tabClass("upload")}>Upload Footage</button>
       </>}
       <button disabled={!hasEdit} onClick={() => setPanelTab("clips")} className={tabClass("clips")}>Replace shot</button>
       <button onClick={() => setPanelTab("variations")} className={tabClass("variations")}>Suggestions</button>
-      <button onClick={() => setPanelTab("virality")} className={tabClass("virality")}>
-        Virality Review
-      </button>
+      {!workspace && viralityTab}
       <button onClick={() => setPanelTab("render")} className={tabClass("render")}>
         Export
       </button>
