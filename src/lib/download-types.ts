@@ -43,6 +43,7 @@ export interface DownloadEntryCutdownProject {
   masterId: string;
   masterFilename: string;
   storyboardId: string;
+  storyboardRevision?: number;
   title: string;
   hookLine: string;
   targetDuration: number;

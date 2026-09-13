@@ -1,5 +1,2 @@
-import { ProjectList } from "@/components/data/ProjectList";
-
-export default function StoryboardsPage() {
-  return <ProjectList stage="storyboarding" />;
-}
+import { redirect } from "next/navigation";
+export default function Page() { redirect("/editing"); }

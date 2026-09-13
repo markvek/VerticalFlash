@@ -49,6 +49,7 @@ function toEntryProject(p: ProjectMeta): DownloadEntryProject {
         masterId: p.masterId,
         masterFilename: p.masterFilename,
         storyboardId: p.storyboardId,
+        storyboardRevision: p.storyboardSnapshot?.revision,
         title: p.title,
         hookLine: p.hookLine,
         targetDuration: p.targetDuration,

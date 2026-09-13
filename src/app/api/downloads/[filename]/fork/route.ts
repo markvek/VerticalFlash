@@ -6,7 +6,7 @@ import { promises as fs } from "fs";
 import { join } from "path";
 import { extractVideoId, splitVersion } from "@/lib/video-id";
 import { SIDECAR_KINDS } from "@/lib/sidecars";
-import { ANALYSIS_DIR, DOWNLOADS_DIR, EDITING_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
+import { analysisPath, ANALYSIS_DIR, DOWNLOADS_DIR, EDITING_DIR, GENERATED_DIR, RENDERS_DIR } from "@/lib/paths";
 import { listProjectFiles, resolveProjectFile } from "@/lib/download-files";
 
 const NAMES_FILE = join(DOWNLOADS_DIR, ".names.json");
@@ -91,9 +91,9 @@ export async function POST(
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid suggestion" }, { status: 400 });
   }
   const hasRender = await exists(join(RENDERS_DIR, `${srcId}.render.json`));
-  if (!hasRender && !variation) {
+  if (!hasRender && !variation && !await exists(analysisPath(srcId))) {
     return NextResponse.json(
-      { error: "Only videos with a completed remake render can be forked" },
+      { error: "Analyze this video before duplicating its edit" },
       { status: 409 }
     );
   }

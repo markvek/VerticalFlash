@@ -1,3 +1,7 @@
+import { promises as fs } from "fs";
+import { join } from "path";
+import { createHash } from "crypto";
+import { STORYBOARDS_DIR } from "@/lib/paths";
 import { NextRequest, NextResponse } from "next/server";
 import { isValidVideoId } from "@/lib/video-id";
 import { ensureFfmpeg, ffmpegErrorResponse } from "@/lib/ffmpeg";
@@ -15,7 +19,8 @@ import { nativeModel } from "@/lib/models/native";
 // Cutting the beats is a re-encode of a short's worth of video
 export const maxDuration = 300;
 
-const inFlight = new Set<string>();
+const globalState = globalThis as typeof globalThis & { storyboardAccepts?: Set<string> };
+const inFlight = globalState.storyboardAccepts ??= new Set<string>();
 
 // Accept one storyboard: cut its beats out of the master into a new
 // "cutdown" project and open it in the editor. Repeatable per storyboard.
@@ -31,17 +36,36 @@ export async function POST(
   let storyboardId: string;
   let options: StoryboardHandoff;
   let requestedRevision: number | undefined;
+  let requestId: string | undefined;
   try {
-    const body = StoryboardHandoffZ.extend({ storyboard_id: z.string().regex(/^[\w-]+$/), revision: z.number().int().positive().optional() }).parse(await request.json());
+    const body = StoryboardHandoffZ.extend({ request_id: z.string().uuid().optional(), storyboard_id: z.string().regex(/^[\w-]+$/), revision: z.number().int().positive().optional() }).parse(await request.json());
     storyboardId = body.storyboard_id;
     options = StoryboardHandoffZ.parse(body);
     requestedRevision = body.revision;
+    requestId = body.request_id;
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
   if (!storyboardId) {
     return NextResponse.json({ error: "storyboard_id is required" }, { status: 400 });
   }
+
+  const requestPath = requestId ? join(STORYBOARDS_DIR, videoId, "accept-requests", `${requestId}.json`) : null;
+  const fingerprint = createHash("sha256").update(JSON.stringify([storyboardId, requestedRevision, options])).digest("hex");
+  const replay = async () => {
+    if (!requestPath) return null;
+    try {
+      const saved = JSON.parse(await fs.readFile(requestPath, "utf8"));
+      if (saved.fingerprint !== fingerprint) return NextResponse.json({ error: "This request key was used for different storyboard options." }, { status: 409 });
+      const existing = await findDownloadFile(saved.result.videoId);
+      if (!existing) return NextResponse.json({ error: "The edit created by this request was deleted. Start a new edit." }, { status: 409 });
+      await recordStoryboardEdit(videoId, saved.storyboard, saved.result.filename);
+      return NextResponse.json(saved.result);
+    } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") return NextResponse.json({ error: "Could not recover the previous edit request" }, { status: 500 }); }
+    return null;
+  };
+  const recovered = await replay();
+  if (recovered) return recovered;
 
   try {
     await ensureFfmpeg();
@@ -74,14 +98,17 @@ export async function POST(
   if (requestedRevision != null && requestedRevision !== (storyboard.revision ?? 1)) return NextResponse.json({ error: "Storyboard changed. Refresh before creating an edit." }, { status: 409 });
 
   const key = `${videoId}:${storyboardId}`;
-  if (inFlight.has(key)) {
+  const requestKey = requestId ? `${videoId}:request:${requestId}` : key;
+  if (inFlight.has(key) || inFlight.has(requestKey)) {
     return NextResponse.json(
       { error: "This storyboard is already being cut" },
       { status: 409 }
     );
   }
-  inFlight.add(key);
+  inFlight.add(key); inFlight.add(requestKey);
   try {
+    const recovered = await replay();
+    if (recovered) return recovered;
     const record = (await readSavedStoryboard(videoId, storyboard.id))!;
     const current = record.storyboards[0];
     if ((current.revision ?? 1) !== (storyboard.revision ?? 1)) return NextResponse.json({ error: "Storyboard changed. Refresh before creating an edit." }, { status: 409 });
@@ -96,6 +123,12 @@ export async function POST(
       storyboard,
       handoff: { options, review, model: nativeModel(record.request.model) },
     });
+    if (requestPath) {
+      await fs.mkdir(join(STORYBOARDS_DIR, videoId, "accept-requests"), { recursive: true });
+      const temp = `${requestPath}.tmp`;
+      await fs.writeFile(temp, JSON.stringify({ fingerprint, result, storyboard }));
+      await fs.rename(temp, requestPath);
+    }
     // Remember which short came from this storyboard
     await recordStoryboardEdit(videoId, storyboard, result.filename);
     return NextResponse.json(result);
@@ -106,6 +139,6 @@ export async function POST(
       { status: 500 }
     );
   } finally {
-    inFlight.delete(key);
+    inFlight.delete(key); inFlight.delete(requestKey);
   }
 }

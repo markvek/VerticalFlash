@@ -36,10 +36,10 @@ const TRACKS: TrackCard[] = [
     enabled: true,
   },
   {
-    title: "Storyboard shorts from your own footage",
+    title: "Edit your footage",
     description:
-      "Upload a talking-head or product recording, get hook → main → end storyboards, cut shorts from it",
-    href: "/storyboard",
+      "Choose footage, explore storyboards, and refine your edit in one workspace",
+    href: "/editing/new",
     enabled: true,
   },
 ];

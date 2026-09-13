@@ -9,6 +9,7 @@ import { beginMediaPlayback, playMedia } from "@/lib/media-playback";
 interface ReviewItem { storyboard: Storyboard; review: ViralityReview | null }
 export function useStoryboardReviews(videoId: string, refreshKey = "") {
   const [items, setItems] = useState<ReviewItem[]>([]);
+  const [timelineChanged, setTimelineChanged] = useState(false);
   const [snapshot, setSnapshot] = useState(false);
   const [loading, setLoading] = useState(true);
   const [reviewing, setReviewing] = useState<string | null>(null);
@@ -22,7 +23,7 @@ export function useStoryboardReviews(videoId: string, refreshKey = "") {
       const response = await fetch(`/api/analyze/${videoId}/virality`, { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Could not load reviews");
-      if (request === generation.current) { setItems(data.items); setSnapshot(data.snapshot); }
+      if (request === generation.current) { setItems(data.items); setSnapshot(data.snapshot); setTimelineChanged(!!data.timelineChanged); }
     } catch (error) { if (request === generation.current) setError(error instanceof Error ? error.message : "Could not load reviews"); }
     finally { if (request === generation.current) setLoading(false); }
   }, [videoId]);
@@ -39,16 +40,18 @@ export function useStoryboardReviews(videoId: string, refreshKey = "") {
     } catch (error) { setError(error instanceof Error ? error.message : "Review failed"); }
     finally { setReviewing(null); }
   };
-  return { items, snapshot, loading, reviewing, error, review };
+  return { items, snapshot, timelineChanged, loading, reviewing, error, review };
 }
 
 export function ViralityReviewPanel({ videoId, storyboardId, onSeek }: { videoId: string; storyboardId?: string; onSeek?: (time: number, source?: FootageSource) => void }) {
-  const { items, snapshot, loading, reviewing, error, review } = useStoryboardReviews(videoId);
+  const { items, snapshot, timelineChanged, loading, reviewing, error, review } = useStoryboardReviews(videoId);
   const [selected, setSelected] = useState(storyboardId ?? "");
+  useEffect(() => { setSelected(storyboardId ?? ""); }, [storyboardId, videoId]);
   const [sourcePreview, setSourcePreview] = useState<{ filename: string; time: number; request: number } | null>(null);
   const sourceVideo = useRef<HTMLVideoElement>(null);
   const seekSource = (time: number, source?: FootageSource) => {
-    if (!source) { setSourcePreview(null); onSeek?.(time); return; }
+    if (onSeek) { setSourcePreview(null); onSeek(time, source); return; }
+    if (!source) { setSourcePreview(null); return; }
     const request = beginMediaPlayback();
     const localTime = Math.max(0, time - source.offset);
     if (sourcePreview?.filename === source.filename && sourceVideo.current) {
@@ -72,6 +75,7 @@ export function ViralityReviewPanel({ videoId, storyboardId, onSeek }: { videoId
           {items.map(i => <option key={i.storyboard.id} value={i.storyboard.id}>{i.storyboard.title}</option>)}
         </select></label>}
       <p className="text-xs text-muted-foreground">{item.storyboard.title} · Storyboard revision {item.storyboard.revision ?? 1}{snapshot ? " · Saved at transition to editing" : ""}</p>
+      {snapshot && timelineChanged && <p role="status" className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-400">Timeline changed since storyboard adoption. This saved review does not assess those changes.</p>}
       {snapshot && <p className="text-xs text-muted-foreground">This review describes the original storyboard. Later timeline edits and rendered audio, visuals, and captions have not been assessed.</p>}
       {!snapshot && !assessment && <div className="space-y-2"><p className="text-xs text-muted-foreground">This revision has no review yet. New ideas are reviewed automatically; edited or older ideas can be reviewed here.</p>
         <button disabled={!!reviewing} onClick={() => review(item.storyboard.id)} className="inline-flex items-center gap-2 rounded bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50">{reviewing && <Loader2 className="size-3 animate-spin" />}{reviewing ? "Reviewing storyboard…" : "Review storyboard"}</button></div>}
