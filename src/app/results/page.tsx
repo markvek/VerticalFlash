@@ -24,6 +24,7 @@ function ResultsContent() {
     const competitors = searchParams.get("competitors") || "";
     const tiktokUrl = searchParams.get("tiktokUrl") || "";
     const minViews = Number(searchParams.get("minViews")) || 0;
+    const maxDuration = Number(searchParams.get("maxDuration")) || 0;
 
     setError(null);
 
@@ -60,6 +61,7 @@ function ResultsContent() {
             competitors,
             tiktokUrl,
             minViews,
+            maxDuration,
           }),
         });
 
@@ -80,6 +82,7 @@ function ResultsContent() {
             : [],
           tiktokUrl: tiktokUrl || undefined,
           minViews: minViews || undefined,
+          maxDuration: maxDuration || undefined,
         };
 
         const newScan = createScan(seeds, result);

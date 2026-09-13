@@ -11,6 +11,7 @@ export default function ScanPage() {
   const [keywords, setKeywords] = useState("");
   const [competitors, setCompetitors] = useState("");
   const [millionViewsOnly, setMillionViewsOnly] = useState(false);
+  const [shortOnly, setShortOnly] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -28,6 +29,7 @@ export default function ScanPage() {
     if (keywords.trim()) params.set("keywords", keywords.trim());
     if (competitors.trim()) params.set("competitors", competitors.trim());
     if (millionViewsOnly) params.set("minViews", "1000000");
+    if (shortOnly) params.set("maxDuration", "25");
 
     router.push(`/results?${params.toString()}`);
   };
@@ -126,9 +128,19 @@ export default function ScanPage() {
             />
             Only include videos with 1M+ views
           </label>
-          <p className="text-xs text-muted-foreground">
-            Videos longer than 25 seconds are always excluded.
-          </p>
+          <label
+            htmlFor="short-only"
+            className="flex cursor-pointer items-center gap-2 text-sm font-medium"
+          >
+            <input
+              id="short-only"
+              type="checkbox"
+              checked={shortOnly}
+              onChange={(e) => setShortOnly(e.target.checked)}
+              className="size-4 rounded border-input accent-primary"
+            />
+            Only include videos 25 seconds or shorter
+          </label>
 
           <Button
             type="submit"

@@ -19,6 +19,7 @@ interface ScanRequest {
   competitors?: string;
   expand?: boolean;
   minViews?: number;
+  maxDuration?: number;
 }
 
 function parseCommaSeparated(value: string | undefined): string[] {
@@ -41,6 +42,10 @@ export async function POST(request: NextRequest) {
       typeof body.minViews === "number" && body.minViews > 0
         ? body.minViews
         : 0;
+    const maxDuration =
+      typeof body.maxDuration === "number" && body.maxDuration > 0
+        ? body.maxDuration
+        : 0;
 
     if (!hashtagList.length && !keywordList.length && !competitorList.length) {
       return NextResponse.json({ error: "Enter a hashtag, keyword, or competitor to search" }, { status: 400 });
@@ -50,11 +55,15 @@ export async function POST(request: NextRequest) {
     const [hashtagResults, keywordResults, competitorResults] =
       await Promise.all([
         Promise.allSettled(
-          hashtagList.map((tag) => scanHashtag(tag, minViews))
+          hashtagList.map((tag) => scanHashtag(tag, minViews, maxDuration))
         ),
-        Promise.allSettled(keywordList.map((kw) => scanKeyword(kw, minViews))),
         Promise.allSettled(
-          competitorList.map((comp) => scanCompetitor(comp, minViews))
+          keywordList.map((kw) => scanKeyword(kw, minViews, maxDuration))
+        ),
+        Promise.allSettled(
+          competitorList.map((comp) =>
+            scanCompetitor(comp, minViews, maxDuration)
+          )
         ),
       ]);
 
@@ -112,6 +121,7 @@ export async function POST(request: NextRequest) {
           seedTags: hashtagList,
           tiktokUrl: body.tiktokUrl,
           minViews,
+          maxDurationSeconds: maxDuration,
         });
       } catch (error) {
         errors.push({ query: body.tiktokUrl ?? "discovery", kind: "discovery", message: error instanceof Error ? error.message : "Discovery failed" });
