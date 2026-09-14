@@ -114,7 +114,7 @@ function SourceEditingWorkspace({ filename, files, reload, initialEdit, search }
       playMedia(video.current, request).catch(() => {});
     }
   };
-  const preview = <div className="min-w-0 self-start">
+  const preview = <div className="w-full min-w-0 self-start">
     <div className="relative mx-auto aspect-[9/16] w-full max-w-80 overflow-hidden rounded-lg bg-black">
       <video ref={video} key={source?.filename ?? filename} src={source ? `/api/library/clips/${encodeURIComponent(source.filename)}` : `/api/downloads/${encodeURIComponent(filename)}`}
         poster={source ? `/api/library/thumbs/${encodeURIComponent(source.filename)}` : `/api/download-thumb/${encodeURIComponent(filename)}`}
@@ -125,7 +125,7 @@ function SourceEditingWorkspace({ filename, files, reload, initialEdit, search }
             video.current.currentTime = pending.time;
             playMedia(video.current, pending.request).catch(() => {});
           }
-        }} className="h-full w-full object-contain" />
+        }} className="absolute inset-0 block h-full w-full object-contain" />
       {mediaError && <p role="alert" className="absolute inset-x-2 top-3 rounded bg-black/80 p-2 text-xs text-red-300">Footage could not be loaded</p>}
     </div>
     {source && <p className="mt-2 truncate text-xs text-muted-foreground" title={source.filename}>{source.filename}</p>}
