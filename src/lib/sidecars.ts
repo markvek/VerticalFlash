@@ -3,6 +3,8 @@
 // sidecar kind only has to be registered once.
 export const SIDECAR_KINDS = [
   "timeline-history",
+  "reference-import",
+  "replacement-history",
   "framing",
   "broll",
   "model-selection",

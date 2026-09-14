@@ -9,7 +9,7 @@ import { findDownloadFile } from "@/lib/download-files";
 import { readProjectMeta } from "@/lib/project-meta";
 import { getGeminiClient } from "@/lib/gemini";
 import { nativeModel } from "@/lib/models/native";
-import { sidecarPath } from "@/lib/paths";
+import { analysisPath, sidecarPath } from "@/lib/paths";
 import { ViralityReviewZ } from "@/lib/virality-schema";
 
 export const maxDuration = 300;
@@ -25,7 +25,10 @@ export async function GET(_request: NextRequest, { params }: Context) {
       let review = null;
       try { review = ViralityReviewZ.nullable().parse(JSON.parse(await fs.readFile(sidecarPath(videoId, "virality"), "utf8")).review); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      return NextResponse.json({ snapshot: true, items: meta.storyboardSnapshot ? [{ storyboard: meta.storyboardSnapshot, review }] : [] });
+      let timelineChanged = false;
+      try { timelineChanged = !!JSON.parse(await fs.readFile(analysisPath(videoId), "utf8")).shotsEditedAt; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      return NextResponse.json({ snapshot: true, timelineChanged, items: meta.storyboardSnapshot ? [{ storyboard: meta.storyboardSnapshot, review }] : [] });
     }
     if (meta?.kind !== "master") return NextResponse.json({ snapshot: false, items: [] });
     const doc = await readStoryboards(videoId);

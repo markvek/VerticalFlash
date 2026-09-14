@@ -1,3 +1,4 @@
+import { clipDescription } from "@/lib/library-metadata";
 import { createUserContent } from "@google/genai";
 import { getBrandConfig } from "./config";
 import type { GoogleGenAI } from "@google/genai";
@@ -85,7 +86,7 @@ function buildPrompt(
       duration_s: v.duration ?? undefined,
       time_of_day: v.analysis!.time_of_day,
       category: v.analysis!.category,
-      description: (v.description || v.analysis!.description).slice(0, 140),
+      description: clipDescription(v).slice(0, 140),
     }));
 
   const brand = getBrandConfig();

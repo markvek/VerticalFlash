@@ -91,9 +91,22 @@ test("Start Edit honors both checkboxes, saves the review, rejects stale input, 
   assert.equal((await api.POST(request({ storyboard_id: storyboard.id, add_text: "yes" }), params)).status, 400);
 
   for (const enabled of [false, true]) {
-    const response = await api.POST(request({ storyboard_id: storyboard.id, revision: 1, add_text: enabled, add_broll: enabled }), params);
+    const requestId = crypto.randomUUID();
+    const body = { request_id: requestId, storyboard_id: storyboard.id, revision: 1, add_text: enabled, add_broll: enabled };
+    const response = await api.POST(request(body), params);
     const result = await response.json();
     assert.equal(response.status, 200, JSON.stringify(result));
+    const replay = await api.POST(request(body), params);
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json()).filename, result.filename, "A retried acceptance must reuse its edit");
+    assert.equal((await api.POST(request({ ...body, add_text: !enabled }), params)).status, 409);
+    const fork = await import("../src/app/api/downloads/[filename]/fork/route");
+    const duplicated = await fork.POST(request({}), { params: Promise.resolve({ filename: result.filename }) });
+    assert.equal(duplicated.status, 200, JSON.stringify(await duplicated.clone().json()));
+    const copy = await duplicated.json();
+    const copied = JSON.parse(await fs.readFile(join(paths.EDITING_DIR, `${copy.filename}.metadata.json`), "utf8"));
+    assert.equal(copied.masterId, doc.videoId);
+    assert.equal(copied.storyboardId, storyboard.id);
     const overlays = JSON.parse(await fs.readFile(paths.sidecarPath(result.videoId, "text-overlays"), "utf8"));
     const broll = JSON.parse(await fs.readFile(paths.sidecarPath(result.videoId, "broll"), "utf8"));
     const recommendations = JSON.parse(await fs.readFile(paths.sidecarPath(result.videoId, "recommendations"), "utf8"));

@@ -6,17 +6,23 @@ import type { BrollSegment } from "./broll-schema";
 export type TimelineOperation =
   | { type: "trim"; index: number; start: number; end: number }
   | { type: "move"; index: number; to: number }
-  | { type: "remove"; index: number };
+  | { type: "remove"; index: number }
+  | { type: "broll"; index: number; filename: string; start: number; end: number; offset?: number }
+  | { type: "insert" | "replace"; index: number; filename: string; start: number; end: number };
 export interface ClipRange { source_start: number; source_end: number; start_time: number; end_time: number }
 export interface SourceBounds { min: number; max: number }
 
 // order maps each new position to its old position. Every indexed sidecar
 // uses this same mapping, including sparse settings and B-roll anchors.
-export function editTimeline<T extends ClipRange>(shots: T[], op: TimelineOperation, bounds: SourceBounds[]) {
-  if (!shots[op.index]) throw new Error("Clip no longer exists");
+export function editTimeline<T extends ClipRange>(shots: T[], op: TimelineOperation, bounds: SourceBounds[], inserted?: T) {
+  if (op.type !== "insert" && !shots[op.index]) throw new Error("Clip no longer exists");
   const order = shots.map((_, i) => i);
   const next = shots.map(s => ({ ...s }));
-  if (op.type === "trim") {
+  if (op.type === "broll") throw new Error("B-roll does not change main-track ranges");
+  if (op.type === "insert" || op.type === "replace") {
+    if (!Number.isInteger(op.index) || op.index < 0 || op.index > shots.length || !inserted || !Number.isFinite(inserted.source_start) || !Number.isFinite(inserted.source_end) || inserted.source_end - inserted.source_start < MIN_SHOT_SECONDS - 0.000001) throw new Error("Invalid footage insertion");
+    order.splice(op.index, op.type === "replace" ? 1 : 0, -1);
+  } else if (op.type === "trim") {
     const limit = bounds[op.index];
     if (!limit || !Number.isFinite(op.start) || !Number.isFinite(op.end) || op.start < limit.min || op.end > limit.max + 0.001 || op.end - op.start < MIN_SHOT_SECONDS - 0.000001) {
       throw new Error(`Choose a source range of at least ${MIN_SHOT_SECONDS}s within the available footage`);
@@ -33,7 +39,7 @@ export function editTimeline<T extends ClipRange>(shots: T[], op: TimelineOperat
   let cursor = 0;
   const round = (t: number) => Math.round(t * 1000) / 1000;
   const result = order.map((oldIndex, index) => {
-    const s = next[oldIndex];
+    const s = oldIndex === -1 ? inserted! : next[oldIndex];
     const start_time = round(cursor);
     cursor += s.source_end - s.source_start;
     return { ...s, index, start_time, end_time: round(cursor) };

@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { BarChart3, ChevronRight, ClipboardCheck, Film, Home, Menu, PanelLeftClose, PanelLeftOpen, RotateCcw, Search, Settings2, Trash2, X } from "lucide-react";
 import { useScanHistory } from "@/app/context/scan-history";
 import type { DownloadEntry } from "@/lib/download-types";
-import { projectHref, projectStage } from "@/lib/project-navigation";
+import { projectHref, projectStage, workspaceProjects } from "@/lib/project-navigation";
 
 export function HistorySidebar() {
   const { scans, currentScanId, deleteScan } = useScanHistory();
@@ -73,7 +73,7 @@ export function HistorySidebar() {
       if (!response.ok) throw new Error(data.error || "Could not delete project");
       window.dispatchEvent(new Event("downloads-changed"));
       if (pathname.endsWith(`/${encodeURIComponent(file.name)}`)) {
-        window.location.assign(projectStage(file) === "storyboarding" ? "/storyboards" : "/editing");
+        window.location.assign("/editing");
       }
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not delete project");
@@ -147,11 +147,11 @@ export function HistorySidebar() {
             </div>}
           </section>
 
-          {(["storyboarding", "editing"] as const).map((stage) => {
-            const title = stage === "storyboarding" ? "Storyboarding" : "Editing";
-            const entries = files.filter((file) => projectStage(file) === stage)
+          {(["editing"] as const).map((stage) => {
+            const title = "Editing";
+            const entries = workspaceProjects(files).filter((file) => projectStage(file) === stage)
               .sort((a, b) => (b.lastEditedAt ?? b.modified) - (a.lastEditedAt ?? a.modified));
-            const href = stage === "storyboarding" ? "/storyboards" : "/editing";
+            const href = "/editing";
             return <section key={stage} className="space-y-2 border-t border-border pt-4">
               <div className="flex min-h-5 items-center gap-2">
                 <button onClick={() => setOpen((value) => ({ ...value, [stage]: !value[stage] }))}
@@ -165,13 +165,13 @@ export function HistorySidebar() {
               </div>
               {open[stage] && <div id={`sidebar-${stage}`} className="max-h-48 space-y-1 overflow-y-auto">
                 {loading ? <p className="px-2 text-xs text-muted-foreground">Loading...</p>
-                  : entries.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">No {stage === "storyboarding" ? "storyboards" : "editing projects"} yet</p>
+                  : entries.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">No {"editing projects"} yet</p>
                   : entries.map((file) => {
                     const selected = pathname.endsWith(`/${encodeURIComponent(file.name)}`);
                     return <div key={file.name} className={`group flex min-h-11 items-center gap-1 rounded px-2 py-1.5 ${selected ? "bg-muted" : "hover:bg-muted/50"}`}>
                       <Link href={projectHref(file)} aria-current={selected ? "page" : undefined} className="min-w-0 flex-1 text-xs" title={file.displayName}>
                         <div className="truncate">{file.displayName}</div>
-                        <div className="mt-0.5 truncate text-muted-foreground">{stage === "storyboarding" ? "Storyboarding File" : file.name}</div>
+                        <div className="mt-0.5 truncate text-muted-foreground">{file.project?.kind === "master" ? "Storyboards & edits" : file.name}</div>
                       </Link>
                       <button onClick={() => removeProject(file)} disabled={deleting === file.name}
                         aria-label={`Delete ${file.displayName}`} title="Delete project"

@@ -133,10 +133,12 @@ export async function buildDiscovery(opts: {
   tiktokUrl?: string;
   topK?: number;
   minViews?: number;
+  maxDurationSeconds?: number;
 }): Promise<DiscoveryData | undefined> {
   const { harvest, seedTags, tiktokUrl } = opts;
   const topK = opts.topK ?? EXPAND_TOP_K;
   const minViews = opts.minViews ?? 0;
+  const maxDurationSeconds = opts.maxDurationSeconds ?? 0;
 
   if (harvest.length === 0) return undefined;
 
@@ -177,11 +179,13 @@ export async function buildDiscovery(opts: {
   });
 
   // Hop 2: pull recent videos for the top in-zone tags, under the same
-  // views floor as the seed scans so discovery can't reintroduce
+  // views/duration filters as the seed scans so discovery can't reintroduce
   // filtered-out videos
   const picks = inZone.slice(0, topK);
   const pullResults = await Promise.allSettled(
-    picks.map((tag) => fetchTagPosts(tag.challengeId, POSTS_PER_PULL, minViews))
+    picks.map((tag) =>
+      fetchTagPosts(tag.challengeId, POSTS_PER_PULL, minViews, maxDurationSeconds)
+    )
   );
 
   const expandedTags: DiscoveredTag[] = [];

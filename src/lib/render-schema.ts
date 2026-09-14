@@ -64,6 +64,12 @@ export type RenderShot = z.infer<typeof RenderShotZ>;
 
 // Full stored manifest: renders/<videoId>.render.json
 export const RenderManifestZ = z.object({
+  issues: z.array(z.object({ shot_index: z.number().nullable(), message: z.string(), fix: z.string() })).optional(),
+  outputSha256: z.string().optional(),
+  exportId: z.string().optional(),
+  editRevision: z.string().optional(),
+  status: z.enum(["ready", "preview_with_issues"]).optional(),
+  requestedOptions: z.object({ audio: z.enum(["music", "original", "none"]), music_filename: z.string().nullable(), burn_text: z.boolean() }).optional(),
   framing: FramingDocumentZ.optional(),
   videoId: z.string(),
   renderedAt: z.string(),

@@ -24,7 +24,13 @@ export async function previewSources(videoId: string, path: string, analysis: An
   const { planned } = planShots(analysis, recs, basename(path), durations, times, new Map(), []);
   const result: Record<string, PreviewSource[]> = {};
   for (const shot of planned) {
-    if (shot.clip_source === "source") { result[String(shot.shot_index)] = originals[String(shot.shot_index)] ?? []; continue; }
+    if (shot.clip_source === "source") {
+      const choice = recs.shots.find(s => s.shot_index === shot.shot_index);
+      const warning = recs.mode === "reference" && (!choice || choice.needs_replacement || !choice.keep_source)
+        ? "Needs replacement — showing reference footage. Choose a clip or Keep original before export." : null;
+      result[String(shot.shot_index)] = (originals[String(shot.shot_index)] ?? []).map(s => ({ ...s, ...(warning ? { warning } : {}) }));
+      continue;
+    }
     if (!shot.clip) { result[String(shot.shot_index)] = []; continue; }
     const duration = durations.get(shot.clip);
     const maxStart = duration == null ? Infinity : shot.fill && shot.fill !== "black" ? Math.max(0, duration - 0.2) : Math.max(0, duration - shot.duration);

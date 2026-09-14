@@ -227,20 +227,34 @@ export async function fetchTagDetail(tagName: string): Promise<TagDetail> {
 const FILTER_PAGE_SIZE = 30;
 const FILTER_MAX_PAGES = 5;
 
-// Clips longer than this can't be remixed into short-form output, so no
-// scan ever surfaces them. Videos with no duration metadata (photo-mode
-// posts) are dropped too.
-const MAX_DURATION_SECONDS = 25;
+// Optional short-form cap from the scan page checkbox. 0 means no
+// upper bound. Videos with no duration metadata (photo-mode posts)
+// are still dropped.
+export const SHORT_FORM_MAX_SECONDS = 25;
 
-function passesWebFilters(item: VideoItem, minPlayCount: number): boolean {
+function durationWithinCap(seconds: number, maxDurationSeconds: number): boolean {
+  if (seconds <= 0) return false;
+  if (maxDurationSeconds > 0 && seconds > maxDurationSeconds) return false;
+  return true;
+}
+
+function passesWebFilters(
+  item: VideoItem,
+  minPlayCount: number,
+  maxDurationSeconds = 0
+): boolean {
   const duration = item.video?.duration || 0; // seconds
-  if (duration <= 0 || duration > MAX_DURATION_SECONDS) return false;
+  if (!durationWithinCap(duration, maxDurationSeconds)) return false;
   return (item.stats?.playCount || 0) >= minPlayCount;
 }
 
-function passesAppFilters(item: AppVideoItem, minPlayCount: number): boolean {
+function passesAppFilters(
+  item: AppVideoItem,
+  minPlayCount: number,
+  maxDurationSeconds = 0
+): boolean {
   const duration = item.video?.duration || 0; // milliseconds
-  if (duration <= 0 || duration > MAX_DURATION_SECONDS * 1000) return false;
+  if (!durationWithinCap(duration / 1000, maxDurationSeconds)) return false;
   return (item.statistics?.play_count || 0) >= minPlayCount;
 }
 
@@ -266,7 +280,8 @@ async function collectFilteredPages<TData, TItem>(opts: {
 export async function fetchTagPosts(
   challengeId: string,
   count: number = 10,
-  minPlayCount: number = 0
+  minPlayCount: number = 0,
+  maxDurationSeconds: number = 0
 ): Promise<VideoItem[]> {
   return collectFilteredPages<TagPostsData, VideoItem>({
     fetchPage: (cursor) =>
@@ -280,7 +295,7 @@ export async function fetchTagPosts(
       hasMore: Boolean(data.hasMore && data.cursor),
       cursor: data.cursor,
     }),
-    passes: (item) => passesWebFilters(item, minPlayCount),
+    passes: (item) => passesWebFilters(item, minPlayCount, maxDurationSeconds),
     count,
   });
 }
@@ -288,7 +303,8 @@ export async function fetchTagPosts(
 export async function fetchSearchVideos(
   keyword: string,
   count: number = 10,
-  minPlayCount: number = 0
+  minPlayCount: number = 0,
+  maxDurationSeconds: number = 0
 ): Promise<AppVideoItem[]> {
   // The /web/fetch_search_video endpoint currently 400s upstream,
   // so we use the app-API search instead
@@ -308,7 +324,7 @@ export async function fetchSearchVideos(
         .map((item) => item.aweme_info)
         .filter(Boolean),
     next: (data) => ({ hasMore: Boolean(data.has_more), cursor: data.cursor }),
-    passes: (item) => passesAppFilters(item, minPlayCount),
+    passes: (item) => passesAppFilters(item, minPlayCount, maxDurationSeconds),
     count,
   });
 }
@@ -374,7 +390,8 @@ export async function fetchMusicDetail(musicId: string): Promise<AppMusicInfo> {
 export async function fetchUserPosts(
   secUid: string,
   count: number = 15,
-  minPlayCount: number = 0
+  minPlayCount: number = 0,
+  maxDurationSeconds: number = 0
 ): Promise<VideoItem[]> {
   return collectFilteredPages<TagPostsData, VideoItem>({
     fetchPage: (cursor) =>
@@ -388,7 +405,7 @@ export async function fetchUserPosts(
       hasMore: Boolean(data.hasMore && data.cursor),
       cursor: data.cursor,
     }),
-    passes: (item) => passesWebFilters(item, minPlayCount),
+    passes: (item) => passesWebFilters(item, minPlayCount, maxDurationSeconds),
     count,
   });
 }
@@ -474,6 +491,8 @@ export interface DiscoveryData {
 }
 
 export interface ScanResult {
+  status?: "complete" | "partial";
+  errors?: Array<{ query: string; kind: string; message: string }>;
   hashtags: HashtagData[];
   keywords: KeywordData[];
   competitors: CompetitorData[];
@@ -519,10 +538,16 @@ export interface CompetitorScan {
 
 export async function scanHashtag(
   tagName: string,
-  minViews: number = 0
+  minViews: number = 0,
+  maxDurationSeconds: number = 0
 ): Promise<HashtagScan> {
   const detail = await fetchTagDetail(tagName);
-  const posts = await fetchTagPosts(detail.challengeId, 10, minViews);
+  const posts = await fetchTagPosts(
+    detail.challengeId,
+    10,
+    minViews,
+    maxDurationSeconds
+  );
   const harvest = posts.map(harvestVideoItem);
 
   return {
@@ -617,9 +642,15 @@ function transformAppVideo(item: AppVideoItem): Video {
 
 export async function scanKeyword(
   keyword: string,
-  minViews: number = 0
+  minViews: number = 0,
+  maxDurationSeconds: number = 0
 ): Promise<KeywordScan> {
-  const items = await fetchSearchVideos(keyword, 10, minViews);
+  const items = await fetchSearchVideos(
+    keyword,
+    10,
+    minViews,
+    maxDurationSeconds
+  );
   const harvest = items.map(harvestAppVideoItem);
 
   return {
@@ -633,7 +664,8 @@ export async function scanKeyword(
 
 export async function scanCompetitor(
   handle: string,
-  minViews: number = 0
+  minViews: number = 0,
+  maxDurationSeconds: number = 0
 ): Promise<CompetitorScan> {
   const profile = await fetchUserProfile(handle);
 
@@ -642,7 +674,12 @@ export async function scanCompetitor(
   let harvest: HarvestedVideo[] = [];
   if (profile.user.secUid) {
     try {
-      const posts = await fetchUserPosts(profile.user.secUid, 15, minViews);
+      const posts = await fetchUserPosts(
+        profile.user.secUid,
+        15,
+        minViews,
+        maxDurationSeconds
+      );
       harvest = posts.map(harvestVideoItem);
     } catch (error) {
       console.error(`Failed to fetch posts for "${handle}":`, error);

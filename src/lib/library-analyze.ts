@@ -1,3 +1,4 @@
+import { clipTags } from "./library-metadata";
 import { extname } from "path";
 import { createPartFromUri, createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
@@ -12,7 +13,7 @@ import {
   type ClipGeminiAnalysis,
   type LibraryClip,
 } from "./library-schema";
-import { findLibraryFile, loadLibrary, saveLibrary } from "./library-store";
+import { findLibraryFile, loadLibrary, saveLibrary, withLibraryEdit } from "./library-store";
 
 export { classifyGeminiError, type GeminiErrorKind } from "./gemini";
 export { findLibraryFile, loadLibrary } from "./library-store";
@@ -190,47 +191,48 @@ export async function analyzeLibraryClip(
       file.mimeType || mimeType
     );
 
-    // Auto-save: merge into .metadata.json (user tags are kept, deduped)
-    const library = await loadLibrary();
-    const now = new Date().toISOString();
-    const existingIndex = library.videos.findIndex(
-      (v) => v.filename === filename
-    );
-    const existing: LibraryClip | undefined =
-      existingIndex !== -1 ? library.videos[existingIndex] : undefined;
+    return await withLibraryEdit(async () => {
+      // Auto-save: merge into .metadata.json (user tags are kept, deduped)
+      const library = await loadLibrary();
+      const now = new Date().toISOString();
+      const existingIndex = library.videos.findIndex(
+        (v) => v.filename === filename
+      );
+      const existing: LibraryClip | undefined =
+        existingIndex !== -1 ? library.videos[existingIndex] : undefined;
 
-    const mergedTags = Array.from(
-      new Set([...(existing?.tags || []), ...analysis.suggested_tags])
-    );
+      const mergedTags = clipTags({ ...existing, analysis } as LibraryClip);
 
-    const updated: LibraryClip = {
-      filename,
-      createdAt: existing?.createdAt || now,
-      source: existing?.source ?? null,
-      // ffprobe wins only when the user hasn't set a value
-      date: existing?.date || creationTime,
-      duration: existing?.duration ?? duration,
-      description: existing?.description || analysis.description,
-      tags: mergedTags,
-      analysis: {
-        ...analysis,
-        analyzedAt: now,
-        model: GEMINI_MODEL,
-        ...(usage ? { usage } : {}),
-      },
-      updatedAt: now,
-    };
+      const updated: LibraryClip = {
+        filename,
+        createdAt: existing?.createdAt || now,
+        source: existing?.source ?? null,
+        // ffprobe wins only when the user hasn't set a value
+        date: existing?.date !== undefined ? existing.date : creationTime,
+        duration: existing?.duration ?? duration,
+        description: existing?.description,
+        rejected_tags: existing?.rejected_tags,
+        tags: mergedTags,
+        analysis: {
+          ...analysis,
+          analyzedAt: now,
+          model: GEMINI_MODEL,
+          ...(usage ? { usage } : {}),
+        },
+        updatedAt: now,
+      };
 
-    if (existingIndex !== -1) {
-      library.videos[existingIndex] = updated;
-    } else {
-      library.videos.push(updated);
-    }
-    library.lastUpdated = now;
+      if (existingIndex !== -1) {
+        library.videos[existingIndex] = updated;
+      } else {
+        library.videos.push(updated);
+      }
+      library.lastUpdated = now;
 
-    await saveLibrary(library);
+      await saveLibrary(library);
 
-    return { updated, usage };
+      return { updated, usage };
+    });
   } finally {
     if (uploadedName) {
       try {

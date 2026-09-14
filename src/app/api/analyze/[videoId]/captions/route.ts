@@ -1,10 +1,11 @@
+import { projectModel } from "@/lib/models/native";
 import { NextRequest, NextResponse } from "next/server";
 import { getBrandConfig } from "@/lib/config";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { createUserContent } from "@google/genai";
 import type { GoogleGenAI } from "@google/genai";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini";
+import { getGeminiClient, getGeminiModel } from "@/lib/gemini";
 import { AnalysisZ, type Analysis } from "@/lib/analysis-schema";
 import {
   CaptionsZ,
@@ -152,7 +153,7 @@ async function generateCaptions(
           }). Return ONLY valid JSON matching the provided schema.`;
 
     const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       contents: createUserContent([prompt]),
       config: {
         responseMimeType: "application/json",
@@ -316,7 +317,7 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch (error) {
     return NextResponse.json(
       {
@@ -351,7 +352,7 @@ export async function POST(
     const stored: Captions = CaptionsZ.parse({
       videoId,
       generatedAt: new Date().toISOString(),
-      model: GEMINI_MODEL,
+      model: getGeminiModel(ai),
       captions: result.captions,
       hashtags,
       tikhubChecked,

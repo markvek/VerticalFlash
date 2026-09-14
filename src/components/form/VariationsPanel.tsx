@@ -43,6 +43,7 @@ function mergeNote(existing: string, addition: string): string {
 }
 
 interface Props {
+  filename: string;
   videoId: string;
   variations: Variations;
   editNotes: Record<string, string>;
@@ -55,6 +56,7 @@ interface Props {
 }
 
 export function VariationsPanel({
+  filename,
   videoId,
   variations,
   editNotes,
@@ -114,6 +116,19 @@ export function VariationsPanel({
     } finally {
       setBusyId(null);
     }
+  };
+
+  const createAlternate = async (v: Variation) => {
+    setBusyId(v.id); setError(null);
+    try {
+      const res = await fetch(`/api/downloads/${encodeURIComponent(filename)}/fork`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ variation_id: v.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not create alternate edit");
+      window.location.assign(`/editing/${encodeURIComponent(data.filename)}?view=variations`);
+    } catch (error) { setError(error instanceof Error ? error.message : "Could not create alternate edit"); }
+    finally { setBusyId(null); }
   };
 
   const move = async (v: Variation, status: Variation["status"]) => {
@@ -230,6 +245,7 @@ export function VariationsPanel({
           </p>
         )}
         <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => createAlternate(v)} disabled={busyId != null} className="px-2 py-1 rounded-md bg-primary text-primary-foreground text-[10px] font-semibold disabled:opacity-60">{busy ? "Creating…" : "Create alternate edit"}</button>
           {v.status === "proposed" && (
             <button
               onClick={() => apply(v)}

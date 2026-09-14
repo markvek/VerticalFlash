@@ -1,3 +1,4 @@
+import { projectModel } from "@/lib/models/native";
 import { withProjectEdit } from "@/lib/project-edit-lock";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -153,7 +154,7 @@ export async function POST(
 
   let ai: GoogleGenAI;
   try {
-    ai = getGeminiClient();
+    ai = getGeminiClient(await projectModel(videoId));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Gemini not configured" }, { status: 500 });
   }

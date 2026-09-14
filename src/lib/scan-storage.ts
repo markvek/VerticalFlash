@@ -6,6 +6,7 @@ export interface ScanSeeds {
   competitors: string[];
   tiktokUrl?: string;
   minViews?: number;
+  maxDuration?: number;
 }
 
 export interface Scan {

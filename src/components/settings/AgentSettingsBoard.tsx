@@ -131,9 +131,9 @@ export function AgentSettingsBoard() {
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <SlidersHorizontal className="size-4" aria-hidden="true" />
-            Execution control
+            Future configuration · inactive
           </div>
-          <h2 id="agent-selector" className="text-lg font-semibold">Agent selector board</h2>
+          <h2 id="agent-selector" className="text-lg font-semibold">Agent preferences (not used by runtime workflows)</h2>
           <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
             Choose which agent should own each workflow step. These selections are saved now; runtime adapters and live benchmark columns can read from this same board later.
           </p>
